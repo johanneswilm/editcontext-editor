@@ -63,6 +63,9 @@ export class Editor extends EventTarget {
     this.focused = false;
     this._settingDomSelection = false;
     this._selectedNode = null;
+    this._pendingSelectRange = null;
+    this._pendingSelectDir = null;
+    this._pendingCaretLoc = null;
     this._listeners = [];
     this.history = new History(options.history);
 
@@ -548,6 +551,65 @@ export class Editor extends EventTarget {
       const moved = this._moveTableSelection(e.shiftKey ? "prev" : "next");
       if (moved) e.preventDefault();
     }
+    // Backspace/Delete with the selection covering whole block objects
+    // (table / block image) removes them in a transaction, leaving the
+    // buffer untouched. Routing this through the textupdate mirroring is
+    // unreliable: Chrome collapses EditContext selections that span object
+    // characters after author updateText() calls, so by the time the second
+    // keypress arrives the UA no longer sees the object selected.
+    if (
+      (e.key === "Backspace" || e.key === "Delete") &&
+      !this.isComposing &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !e.defaultPrevented
+    ) {
+      const { from, to } = this._orderedSelection();
+      const segs = this.map.segments.filter(
+        (s) => s.kind === "blockleaf" && s.start >= from && s.end <= to
+      );
+      if (segs.length && from === segs[0].start && to === segs[segs.length - 1].end) {
+        e.preventDefault();
+        this._removeBlockLeaves(segs, e.key === "Backspace" ? "backward" : "forward");
+      }
+    }
+  }
+
+  /**
+   * Remove whole block leaves selected by the user. `dir` is the direction
+   * of the key that triggered the removal: "backward" (Backspace) places the
+   * caret at the start of the block that followed, "forward" (Delete) at the
+   * end of the one before.
+   */
+  _removeBlockLeaves(segs, dir) {
+    if (this.isComposing) return false;
+    const seg = segs[0];
+    const caretLoc =
+      dir === "forward"
+        ? this.map._nearbyContainerLoc(seg, "backward")
+        : this.map._nearbyContainerLoc(seg, "forward");
+    const removedTops = [...new Set(segs.map((s) => s.path[0]))];
+    const ok = this._transact((doc) => {
+      const paths = [...new Set(segs.map((s) => JSON.stringify(s.path)))]
+        .map(JSON.parse)
+        .sort((x, y) => comparePaths(y, x));
+      for (const p of paths) ops.removeBlock(doc, p);
+    });
+    if (!ok) return false;
+    const path = [...caretLoc.path];
+    if (path.length) {
+      // Blocks after a removed one shift down in the fresh position map.
+      path[0] -= removedTops.filter((i) => i < path[0]).length;
+    }
+    const flat = this.map.locToFlat(path, caretLoc.offset);
+    if (flat != null) {
+      this._setSelection(flat, flat);
+      // Render the new selection so the async DOM selectionchange round-trip
+      // maps the fresh (not the pre-removal) DOM selection.
+      this._afterRender();
+    }
+    return true;
   }
 
   _moveTableSelection(direction) {
@@ -596,7 +658,22 @@ export class Editor extends EventTarget {
     const changed = this._applyFlatEdit(a, b, text);
     this._afterMutation();
     const max = this.map.flatText.length;
-    this._setSelection(clamp(selA, max), clamp(selB, max));
+    const select = this._pendingSelectRange;
+    const caretLoc = this._pendingCaretLoc;
+    this._pendingSelectRange = null;
+    this._pendingCaretLoc = null;
+    if (select) {
+      // The edit was deferred into a block selection (see _applyFlatEdit).
+      this._setSelection(clamp(select[0], max), clamp(select[1], max));
+    } else if (caretLoc) {
+      // A deferred block removal: the UA's own selection refers to its
+      // pre-resync buffer and cannot be used.
+      const flat = this.map.locToFlat(caretLoc.path, caretLoc.offset);
+      const at = flat == null ? clamp(selA, max) : clamp(flat, max);
+      this._setSelection(at, at);
+    } else {
+      this._setSelection(clamp(selA, max), clamp(selB, max));
+    }
     if (changed) this.history.record(this.doc, this.sel, "typing");
     this._afterRender();
     if (changed) this._emit("change");
@@ -610,6 +687,18 @@ export class Editor extends EventTarget {
     const map = this.map;
     const before = JSON.stringify(this.doc);
     let joinLoc = null;
+
+    // State deferred from the previous textupdate: a "select the block"
+    // deferral (Backspace/Delete next to a table or block image) plus the
+    // direction of the key that created it, so the follow-up keypress that
+    // deletes the selected block can place the caret on the correct side.
+    const deferredSelect = this._pendingSelectRange;
+    const deferredDir = this._pendingSelectDir;
+    const deferredRemoval =
+      !!deferredSelect && !text && a === deferredSelect[0] && b === deferredSelect[1];
+    this._pendingSelectRange = null;
+    this._pendingSelectDir = null;
+    this._pendingCaretLoc = null;
 
     if (b > a) {
       const segs = map.segments.filter((s) => s.start < b && s.end > a);
@@ -626,16 +715,31 @@ export class Editor extends EventTarget {
             { path: gap.nextPath, offset: 0 }
           );
         } else if (gap.action === "deleteblk" && gap.blockPath) {
-          // Backspace next to a table / block image deletes that block —
-          // unless the caret is inside it, in which case do nothing.
+          // Backspace/Delete next to a table or block image selects that
+          // block first (Word-style); pressing the key again with the block
+          // selected deletes it. When the caret is inside the block, the
+          // deletion is a no-op.
           const caretLoc = map.flatToLoc(b);
           const inside =
             caretLoc.path.length > gap.blockPath.length &&
             caretLoc.path.slice(0, gap.blockPath.length).every((v, i) => v === gap.blockPath[i]);
-          if (!inside) {
-            ops.removeBlock(this.doc, gap.blockPath);
+          if (inside) {
+            joinLoc = caretLoc;
+          } else {
+            const seg = map.segments.find(
+              (s) => s.kind === "blockleaf" && comparePaths(s.path, gap.blockPath) === 0
+            );
+            if (seg) {
+              this._pendingSelectRange = [seg.start, seg.end];
+              // The gap names the block as its "prev" when the gap sits after
+              // the block — that is the Backspace side; otherwise Delete.
+              this._pendingSelectDir =
+                comparePaths(gap.blockPath, gap.nextPath) === 0 ? "forward" : "backward";
+            } else {
+              ops.removeBlock(this.doc, gap.blockPath);
+            }
+            joinLoc = map._nearbyContainerLoc(gap, "backward");
           }
-          joinLoc = inside ? caretLoc : map._nearbyContainerLoc(gap, "backward");
         } else {
           // "noop" (table cell boundary): nothing to delete in the model;
           // the buffer is resynced from the model afterwards.
@@ -650,6 +754,21 @@ export class Editor extends EventTarget {
           const paths = [...blockSegs.map((s) => s.path)].sort((x, y) => comparePaths(y, x));
           for (const p of paths) ops.removeBlock(this.doc, p);
           joinLoc = map._nearbyContainerLoc(blockSegs[0], "backward");
+          if (deferredRemoval) {
+            // The UA reports the post-edit caret in *its* buffer coordinates,
+            // which no longer match the model once a block is gone (the model
+            // also drops the surrounding gaps and, for tables, the cell
+            // text). Place the caret beside the removed block instead,
+            // honoring the direction of the key that selected it.
+            const seg = blockSegs[0];
+            const loc =
+              deferredDir === "forward"
+                ? map._nearbyContainerLoc(seg, "backward")
+                : map._nearbyContainerLoc(seg, "forward");
+            const caretLoc = { path: [...loc.path], offset: loc.offset };
+            if (caretLoc.path.length && caretLoc.path[0] > seg.path[0]) caretLoc.path[0] -= 1;
+            this._pendingCaretLoc = caretLoc;
+          }
         } else {
           const blockLeaves = blockSegs.map((s) => s.path);
           joinLoc = ops.deleteSpanning(this.doc, map.flatToLoc(a), map.flatToLoc(b), blockLeaves);
