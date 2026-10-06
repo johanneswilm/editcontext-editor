@@ -102,6 +102,7 @@ export class Editor extends EventTarget {
     this._pendingSelectDir = null;
     this._pendingCaretLoc = null;
     this._pasteGuard = false;
+    this._arrowKeyAt = null;
     this._listeners = [];
     this.history = new History(options.history);
 
@@ -204,12 +205,49 @@ export class Editor extends EventTarget {
     };
   }
 
+  /** Object segment (inline image, table, block image) whose character is at flat offset `o`. */
+  _objectSegAt(o) {
+    const seg = this.map.segAt(o);
+    return seg?.dom && (seg.kind === "leaf" || seg.kind === "blockleaf") ? seg : null;
+  }
+
+  /** Object segment immediately before or after the gap position `o`. */
+  _objectSegBeside(o) {
+    return (
+      this.map.segments.find(
+        (s) => s.dom && (s.kind === "leaf" || s.kind === "blockleaf") && (s.end === o || s.start === o)
+      ) ?? null
+    );
+  }
+
   _restoreDomSelection() {
-    const anchorPoint = this.map.flatToDomPoint(this.sel.anchor);
-    const focusPoint = this.map.flatToDomPoint(this.sel.head);
-    if (!anchorPoint || !focusPoint) return;
     const domSel = this.element.ownerDocument.getSelection();
     if (!domSel) return;
+    // A selection covering whole block objects covers their contents, so
+    // the browser paints a highlight over the object; a bare element-
+    // boundary selection only draws a tall bar at the edge.
+    let anchorPoint = null;
+    let focusPoint = null;
+    const { from, to } = this._orderedSelection();
+    const blockSegs = this.map.segments.filter(
+      (s) => s.kind === "blockleaf" && s.start >= from && s.end <= to
+    );
+    if (blockSegs.length && blockSegs[0].start === from && blockSegs[blockSegs.length - 1].end === to) {
+      const first = blockSegs[0];
+      const last = blockSegs[blockSegs.length - 1];
+      anchorPoint =
+        this.sel.anchor <= this.sel.head
+          ? { node: first.dom, offset: 0 }
+          : { node: last.dom, offset: last.dom.childNodes.length };
+      focusPoint =
+        this.sel.anchor <= this.sel.head
+          ? { node: last.dom, offset: last.dom.childNodes.length }
+          : { node: first.dom, offset: 0 };
+    } else {
+      anchorPoint = this.map.flatToDomPoint(this.sel.anchor);
+      focusPoint = this.map.flatToDomPoint(this.sel.head);
+    }
+    if (!anchorPoint || !focusPoint) return;
     const { anchor, head } = this.sel;
     this._settingDomSelection = true;
     try {
@@ -233,6 +271,34 @@ export class Editor extends EventTarget {
     const focusFlat = this.map.domPointToFlat(domSel.focusNode, domSel.focusOffset);
     if (anchorFlat == null || focusFlat == null) return;
     if (anchorFlat === this.sel.anchor && focusFlat === this.sel.head) return;
+
+    // Stepping onto an object (inline image, table, block image) with the
+    // arrow keys selects it — the same state as click-select. Stepping off
+    // a selected object collapses the caret beside it instead. Only arrow
+    // keys trigger this: a click next to an object keeps a plain caret.
+    const viaArrow =
+      this._arrowKeyAt && Date.now() - this._arrowKeyAt.time < 1000 ? this._arrowKeyAt.key : null;
+    this._arrowKeyAt = null;
+    if (viaArrow && anchorFlat === focusFlat) {
+      const seg =
+        this._objectSegAt(anchorFlat) ??
+        (this.map.segAt(anchorFlat)?.kind === "gap" ? this._objectSegBeside(anchorFlat) : null);
+      if (seg) {
+        const wasSelected =
+          Math.min(this.sel.anchor, this.sel.head) === seg.start &&
+          Math.max(this.sel.anchor, this.sel.head) === seg.end;
+        if (!wasSelected) {
+          this.sel = { anchor: seg.start, head: seg.end };
+          this.storedMarks = [];
+          this.editContext.updateSelection(seg.start, seg.end);
+          this._restoreDomSelection();
+          this._updateSelectedNode();
+          this._updateCaretAndBounds();
+          this._emit("selectionchange");
+          return;
+        }
+      }
+    }
     this.sel = { anchor: anchorFlat, head: focusFlat };
     this.storedMarks = [];
     const start = Math.min(anchorFlat, focusFlat);
@@ -256,7 +322,7 @@ export class Editor extends EventTarget {
       this.caret.style.display = "none";
       return;
     }
-    const rect = this.map.rectForOffset(Math.min(this.sel.anchor, this.sel.head));
+    const rect = this.map.caretRectAt(Math.min(this.sel.anchor, this.sel.head));
     if (!rect) {
       this.caret.style.display = "none";
       return;
@@ -621,6 +687,9 @@ export class Editor extends EventTarget {
   }
 
   _onKeyDown(e) {
+    // Remember arrow keys so the selectionchange handler can tell caret
+    // movement from a click (see _onSelectionChange).
+    if (e.key?.startsWith("Arrow")) this._arrowKeyAt = { key: e.key, time: Date.now() };
     // Undo/redo: Chrome does not translate Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y on
     // an EditContext editing host into beforeinput(history*) events, so
     // handle the keys directly. (The beforeinput branch stays as a fallback

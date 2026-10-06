@@ -250,6 +250,28 @@ export class PositionMap {
       return null;
     }
   }
+
+  /**
+   * Rect for a collapsed caret at flat offset `o`. Next to a block object
+   * the caret is one line tall at the block's top-left — not as tall as
+   * the block itself.
+   */
+  caretRectAt(o) {
+    const seg = this.segAt(o);
+    if (seg?.kind === "blockleaf" && seg.dom) {
+      const r = seg.dom.getBoundingClientRect();
+      const parent = seg.dom.parentElement;
+      if (parent) {
+        const idx = Array.prototype.indexOf.call(parent.childNodes, seg.dom);
+        const line = charBoundaryRect(seg.dom.ownerDocument, parent, idx);
+        if (line && line.height > 0 && line.height < r.height) {
+          return new DOMRect(r.left, r.top, 0, line.height);
+        }
+      }
+      return new DOMRect(r.left, r.top, 0, r.height);
+    }
+    return this.rectForOffset(o);
+  }
 }
 
 /** First (or last) non-empty text node inside `node`, descending recursively. */
@@ -273,35 +295,44 @@ function deepText(node, forward) {
 /**
  * Caret rect at an element-boundary DOM point: the left edge of the first
  * character at/after child offset `offset`, or — when no text follows — the
- * right edge of the last character before it. Returns null when there is no
- * text to measure (empty paragraphs fall back to a collapsed range, which
- * correctly reports the single line box).
+ * right edge of the last character before it. When an inline leaf (image,
+ * hard break) sits right at the boundary, the caret hugs its near edge.
+ * Returns null when there is no text to measure (empty paragraphs fall back
+ * to a collapsed range, which correctly reports the single line box).
  */
 function charBoundaryRect(doc, el, offset) {
   const kids = el.childNodes;
   const from = Math.max(0, Math.min(offset, kids.length));
-  for (let i = from; i < kids.length; i++) {
-    const text = deepText(kids[i], true);
-    if (text) {
-      const range = doc.createRange();
+  const rectAt = (text, first) => {
+    const range = doc.createRange();
+    if (first) {
       range.setStart(text, 0);
       range.setEnd(text, 1);
-      const r = range.getBoundingClientRect();
-      if (r && r.height > 0) return new DOMRect(r.left, r.top, 0, r.height);
-    }
-  }
-  for (let i = from - 1; i >= 0; i--) {
-    const text = deepText(kids[i], false);
-    if (text) {
+    } else {
       const end = text.nodeValue.length;
-      const range = doc.createRange();
       range.setStart(text, end - 1);
       range.setEnd(text, end);
-      const r = range.getBoundingClientRect();
-      if (r && r.height > 0) return new DOMRect(r.right, r.top, 0, r.height);
     }
+    const r = range.getBoundingClientRect();
+    if (!r || r.height <= 0) return null;
+    return first ? new DOMRect(r.left, r.top, 0, r.height) : new DOMRect(r.right, r.top, 0, r.height);
+  };
+  const search = (begin, end, step, first) => {
+    for (let i = begin; i !== end; i += step) {
+      const text = deepText(kids[i], first);
+      if (text) {
+        const r = rectAt(text, first);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  const at = from < kids.length ? kids[from] : null;
+  const preferBackward = !!at && at.nodeType !== 3 && deepText(at, true) == null;
+  if (!preferBackward) {
+    return search(from, kids.length, 1, true) ?? search(from - 1, -1, -1, false);
   }
-  return null;
+  return search(from - 1, -1, -1, false) ?? search(from, kids.length, 1, true);
 }
 
 /**
@@ -443,6 +474,11 @@ export function render(doc, container, { imeFormats = [] } = {}) {
     map.flatText += OBJECT_CHAR;
     map.addPoint(flat, parentEl, parentEl.childNodes.length - 1);
     map.addPoint(flat + 1, parentEl, parentEl.childNodes.length);
+    // Content-boundary points: a DOM selection can cover the block's
+    // contents (highlighting the object instead of drawing a boundary
+    // bar) and maps back to these offsets exactly.
+    map.addPoint(flat, dom, 0);
+    map.addPoint(flat + 1, dom, dom.childNodes.length);
     flat += 1;
     prev = { kind: "blockleaf", path, el: null, node: block };
   };

@@ -54,8 +54,10 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
 - **No native caret** outside editable elements (spec design): the editor renders its own blinking caret.
 - **No native object selection** for images/tables (spec design): the editor implements
   click-to-select with its own highlight, so Backspace/Delete and typing-over work on selected objects.
+  Arrow keys select an object when stepping onto it (stepping off collapses the caret beside it), and
   Backspace/Delete *next to* a block object (table, block image) also selects it first — Word-style —
-  and only a second press deletes it (`src/editor.js` `_removeBlockLeaves`).
+  with only a second press deleting it (`src/editor.js` `_removeBlockLeaves`). Object selections cover
+  the block's DOM contents, so the browser paints a highlight over the object instead of a boundary bar.
 - **Object selections don't survive in the EditContext** (Chromium quirk, verified in Chrome 154):
   pushing `updateSelection(start, end)` over an object character works, but after an author
   `updateText()` call Chrome asynchronously collapses the selection to its start. The editor therefore
