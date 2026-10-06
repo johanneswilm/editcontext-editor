@@ -1,0 +1,25 @@
+{
+  "name": "editcontext-editor",
+  "version": "0.1.0",
+  "description": "A DOM-based rich text editor library built on the EditContext API (not contenteditable), with a JSON document model, IME support, tables, images and headings.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "build:demo": "node scripts/build-demo.mjs",
+    "demo": "python3 -m http.server 8080"
+  },
+  "keywords": [
+    "editcontext",
+    "editor",
+    "rich-text",
+    "ime",
+    "contenteditable-free"
+  ],
+  "license": "MIT"
+}

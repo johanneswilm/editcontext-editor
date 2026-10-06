@@ -1,0 +1,220 @@
+:root {
+  color-scheme: light dark;
+  --accent: #4f6ef7;
+  --border: color-mix(in srgb, currentColor 18%, transparent);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.55;
+  background: Canvas;
+  color: CanvasText;
+}
+.site-header {
+  padding: 3rem 1.5rem 1.5rem;
+  max-width: 960px;
+  margin: 0 auto;
+}
+.site-header h1 { margin: 0 0 0.3em; font-size: 2rem; }
+.tagline { max-width: 46em; margin: 0 0 0.6em; }
+.links { color: var(--accent); }
+a { color: var(--accent); }
+main { max-width: 960px; margin: 0 auto; padding: 0 1.5rem 3rem; }
+.support-banner {
+  max-width: 960px;
+  margin: 0 auto 1rem;
+  padding: 0.9em 1.2em;
+  border: 1px solid #d8a106;
+  background: color-mix(in srgb, #d8a106 14%, transparent);
+  border-radius: 10px;
+}
+.demo-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.4rem 1.4rem 1.6rem;
+  margin: 1.4rem 0;
+}
+.demo-section h2 { margin: 0 0 0.4em; font-size: 1.25rem; }
+.hint { color: color-mix(in srgb, CanvasText 62%, transparent); font-size: 0.92rem; max-width: 60em; }
+kbd {
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 0.35em;
+  font-size: 0.85em;
+}
+.editor {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9em 1em;
+  min-height: 3em;
+  background: color-mix(in srgb, CanvasText 3.5%, transparent);
+}
+.editor-full { min-height: 220px; }
+.editor-comment { min-height: 90px; }
+.editor:focus, .editor.ec-focused {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.editor h1, .editor h2, .editor h3 { margin: 0.4em 0 0.3em; }
+
+.toolbar-slot { margin: 0.6rem 0 0.5rem; }
+.ec-toolbar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ec-toolbar .ec-btn {
+  min-width: 2.1em;
+  height: 2.1em;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0 0.5em;
+}
+.ec-toolbar .ec-btn:hover { background: color-mix(in srgb, CanvasText 8%, transparent); }
+.ec-toolbar .ec-btn.ec-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent);
+}
+.ec-toolbar .ec-btn:disabled { opacity: 0.4; cursor: default; }
+.ec-toolbar .ec-block-select {
+  height: 2.1em;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  padding: 0 0.3em;
+}
+.ec-table td { border-color: var(--border); }
+
+.io-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+@media (max-width: 760px) { .io-panes { grid-template-columns: 1fr; } }
+.io-pane h3 { margin: 0; font-size: 0.95rem; }
+.io-sub { font-weight: 400; color: color-mix(in srgb, CanvasText 55%, transparent); font-size: 0.8em; }
+.io-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+.io-head button, .import-actions button, .comment-actions button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  padding: 0.3em 0.9em;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.io-head button:hover, .import-actions button:hover, .comment-actions button:hover {
+  background: color-mix(in srgb, CanvasText 8%, transparent);
+}
+.io-out {
+  margin: 0;
+  padding: 0.8em 1em;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+  font-size: 0.78rem;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Events monitor pane */
+.events-out {
+  margin: 0;
+  padding: 0.4em 0.6em;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, CanvasText 4%, transparent);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.7;
+  max-height: 280px;
+  overflow: auto;
+}
+.events-empty {
+  color: color-mix(in srgb, CanvasText 50%, transparent);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding: 0.35em 0.3em;
+}
+.ev-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+  padding: 0 0.3em;
+  border-radius: 4px;
+}
+.ev-row:nth-child(odd) { background: color-mix(in srgb, CanvasText 4%, transparent); }
+.ev-time {
+  flex: none;
+  color: color-mix(in srgb, CanvasText 45%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.ev-name { flex: none; font-weight: 600; }
+.ev-detail {
+  color: color-mix(in srgb, CanvasText 62%, transparent);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.ev-tag {
+  flex: none;
+  min-width: 5.2em;
+  text-align: center;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.5;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0 0.55em;
+}
+.ev-el {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.ev-ec {
+  background: color-mix(in srgb, #2f9e63 16%, transparent);
+  border-color: color-mix(in srgb, #2f9e63 40%, transparent);
+}
+.ev-doc {
+  background: color-mix(in srgb, #a85fd6 16%, transparent);
+  border-color: color-mix(in srgb, #a85fd6 40%, transparent);
+}
+.ev-cancelled {
+  background: color-mix(in srgb, #d64545 18%, transparent);
+  border-color: color-mix(in srgb, #d64545 45%, transparent);
+}
+.events-legend {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  color: color-mix(in srgb, CanvasText 58%, transparent);
+}
+.events-legend .ev-tag { min-width: 0; }
+.import-box { margin-top: 1rem; }
+.import-box textarea {
+  width: 100%;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6em 0.8em;
+  background: transparent;
+  color: inherit;
+  resize: vertical;
+}
+.import-actions { display: flex; gap: 0.6rem; margin-top: 0.5rem; }
+.comment-actions { display: flex; align-items: center; gap: 0.8rem; margin-top: 0.6rem; }
+.comment-status { color: color-mix(in srgb, CanvasText 60%, transparent); font-size: 0.88rem; }
+.notes ul { padding-left: 1.2em; max-width: 60em; }
+.notes li { margin-bottom: 0.6em; }
+.site-footer {
+  text-align: center;
+  color: color-mix(in srgb, CanvasText 55%, transparent);
+  font-size: 0.85rem;
+  padding: 0 1.5rem 2.5rem;
+}

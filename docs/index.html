@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>editcontext-editor — demo</title>
+<link rel="stylesheet" href="./demo.css">
+</head>
+<body>
+<header class="site-header">
+  <h1>editcontext-editor</h1>
+  <p class="tagline">
+    A rich text editor library built on the <a href="https://w3c.github.io/edit-context/">EditContext API</a>
+    — no <code>contenteditable</code>, DOM-based, with its own JSON document model and full IME support.
+  </p>
+  <p class="links">
+    <a href="https://github.com/johanneswilm/editcontext-editor">GitHub</a> ·
+    <a href="https://w3c.github.io/edit-context/">W3C spec</a> ·
+    <a href="https://developer.mozilla.org/en-US/docs/Web/API/EditContext">MDN</a>
+  </p>
+</header>
+
+<div id="support-banner" class="support-banner" hidden>
+  <strong>Your browser doesn't support the EditContext API yet.</strong>
+  The demo below needs Chrome or Edge 121+ (Safari and Firefox are still working on it), so the
+  editors won't accept input here — but you can still inspect the page and the code.
+</div>
+
+<main>
+  <section class="demo-section">
+    <h2>Full editor</h2>
+    <p class="hint">
+      Try typing (including with an IME — e.g. Japanese or Chinese input), <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>B</kbd>
+      for bold, <kbd>Enter</kbd> for new paragraphs, <kbd>Shift</kbd>+<kbd>Enter</kbd> for a line break,
+      <kbd>Tab</kbd> inside tables to move between cells, paste from other apps, and undo/redo.
+    </p>
+    <div id="toolbar-full" class="toolbar-slot"></div>
+    <div id="editor-full" class="editor editor-full"></div>
+
+    <div class="io-panes">
+      <div class="io-pane">
+        <div class="io-head">
+          <h3>Document JSON <span class="io-sub">(live)</span></h3>
+          <button id="copy-json" type="button">Copy</button>
+        </div>
+        <pre id="json-out" class="io-out"></pre>
+      </div>
+      <div class="io-pane">
+        <div class="io-head">
+          <h3>HTML export <span class="io-sub">(live)</span></h3>
+          <button id="copy-html" type="button">Copy</button>
+        </div>
+        <pre id="html-out" class="io-out"></pre>
+      </div>
+    </div>
+
+    <div class="io-pane events-pane">
+      <div class="io-head">
+        <h3>Events <span class="io-sub">(live — type, click, use Ctrl+Z, an IME…)</span></h3>
+        <button id="events-clear" type="button">Clear</button>
+      </div>
+      <div id="events-out" class="events-out" aria-live="off"></div>
+      <p class="events-legend">
+        <span class="ev-tag ev-el">element</span> events on the editor div ·
+        <span class="ev-tag ev-ec">EditContext</span> events on the edit context ·
+        <span class="ev-tag ev-doc">document</span>-level events ·
+        <span class="ev-tag ev-cancelled">canceled</span> = the editor called preventDefault
+      </p>
+    </div>
+
+    <details class="import-box">
+      <summary>Import / load</summary>
+      <p>Paste a document (JSON in the internal format, or HTML) and load it into the editor:</p>
+      <textarea id="import-input" rows="6" spellcheck="false" placeholder='{"type":"doc","children":[…]}  or  <h1>Hello</h1>'></textarea>
+      <div class="import-actions">
+        <button id="import-load" type="button">Load into editor</button>
+        <button id="load-example" type="button">Load built-in example</button>
+      </div>
+    </details>
+  </section>
+
+  <section class="demo-section">
+    <h2>Blog comment box</h2>
+    <p class="hint">
+      The minimal integration this library is designed for — a few lines of code give you a
+      comment field with common styling options and block types.
+    </p>
+    <div id="toolbar-comment" class="toolbar-slot"></div>
+    <div id="editor-comment" class="editor editor-comment"></div>
+    <div class="comment-actions">
+      <button id="comment-post" type="button">Post comment</button>
+      <span id="comment-status" class="comment-status"></span>
+    </div>
+    <pre id="comment-out" class="io-out" hidden></pre>
+  </section>
+
+  <section class="demo-section notes">
+    <h2>How it works</h2>
+    <ul>
+      <li>
+        The editable element is a plain <code>&lt;div&gt;</code> — not <code>contenteditable</code> — with an
+        <code>EditContext</code> attached. All text input (keyboard, IME, emoji picker, dictation…) flows through
+        the EditContext's plain-text buffer and is reported back as <code>textupdate</code> events.
+      </li>
+      <li>
+        The library mirrors that buffer into its own JSON document model (paragraphs, headings, tables,
+        inline/block images, text marks) and re-renders the DOM from the model on every change.
+      </li>
+      <li>
+        A position map translates between model locations, buffer offsets and DOM points, so selections,
+        IME character bounds (<code>characterboundsupdate</code>) and composition underlines
+        (<code>textformatupdate</code>) all line up — candidate windows appear exactly where you type.
+      </li>
+      <li>
+        Formatting requests (bold/italic/…), Enter, paste, cut and undo arrive as cancelable
+        <code>beforeinput</code> events on the element and are handled by model operations.
+      </li>
+    </ul>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p>MIT licensed · Built with the EditContext API · <a href="https://w3c.github.io/edit-context/">Spec</a></p>
+</footer>
+
+<script type="module" src="./demo.js"></script>
+</body>
+</html>
