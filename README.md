@@ -211,6 +211,14 @@ JSON document model  <->  flat text (EditContext buffer)  <->  DOM
 5. The caret is drawn by the library (native carets only render in editable regions); text selection
    uses the native selection over the rendered DOM, mapped back to buffer offsets via the position map.
 
+**Third-party input events.** Synthetic events dispatched by external code (e.g. browser extensions)
+never reach the EditContext buffer, so the `textupdate` mirroring never sees them. The editor therefore
+also listens for `paste` and `beforeinput(deleteContentBackward/Forward)`: a synthetic `paste` is
+inserted through the same path as `beforeinput(insertFromPaste)` (a guard plus event cancellation keep
+the pair from inserting twice), and a synthetic `deleteContent*` performs a grapheme-aware model
+deletion. Trusted events keep flowing through the UA buffer, so real keyboard and clipboard input is
+never executed twice.
+
 ## Development & demo
 
 ```bash

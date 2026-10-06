@@ -9,6 +9,10 @@
  * `textupdate`; we mirror them into the model through the PositionMap.
  * Non-text input (Enter, paste, cut, formatting, undo) arrives as
  * `beforeinput` on the element and is handled with model operations.
+ * Synthetic `paste` and `beforeinput(deleteContent*)` events — e.g.
+ * dispatched by third-party code such as browser extensions — never reach
+ * the EditContext buffer, so they are handled there as model operations too
+ * (without double-executing the real keyboard/clipboard flows).
  *
  * IME composition is fully supported: composition events, textformatupdate
  * decorations (the underline), and characterboundsupdate responses that let
@@ -29,6 +33,37 @@ const INPUT_TYPE_TO_MARK = {
   formatUnderline: "underline",
   formatStrikethrough: "strikethrough",
 };
+
+const graphemeSegmenter =
+  typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+
+/** Start offset of the grapheme whose end is at (or spans across) `offset`. */
+function previousGraphemeBoundary(text, offset) {
+  if (offset <= 0) return 0;
+  if (graphemeSegmenter) {
+    for (const seg of graphemeSegmenter.segment(text)) {
+      if (seg.index + seg.segment.length >= offset) return seg.index;
+    }
+    return 0;
+  }
+  const code = text.charCodeAt(offset - 1);
+  return offset - (code >= 0xdc00 && code <= 0xdfff && offset >= 2 ? 2 : 1);
+}
+
+/** End offset of the grapheme starting at (or spanning across) `offset`. */
+function nextGraphemeBoundary(text, offset) {
+  if (offset >= text.length) return text.length;
+  if (graphemeSegmenter) {
+    for (const seg of graphemeSegmenter.segment(text)) {
+      if (seg.index >= offset) return seg.index + seg.segment.length;
+    }
+    return text.length;
+  }
+  const code = text.charCodeAt(offset);
+  return offset + (code >= 0xd800 && code <= 0xdbff && offset + 1 < text.length ? 2 : 1);
+}
 
 export function isEditContextSupported() {
   return typeof EditContext !== "undefined";
@@ -66,6 +101,7 @@ export class Editor extends EventTarget {
     this._pendingSelectRange = null;
     this._pendingSelectDir = null;
     this._pendingCaretLoc = null;
+    this._pasteGuard = false;
     this._listeners = [];
     this.history = new History(options.history);
 
@@ -105,6 +141,7 @@ export class Editor extends EventTarget {
   _bindEvents() {
     const ownerDoc = this.element.ownerDocument;
     this._listen(this.element, "beforeinput", (e) => this._onBeforeInput(e));
+    this._listen(this.element, "paste", (e) => this._onPaste(e));
     this._listen(this.element, "keydown", (e) => this._onKeyDown(e));
     this._listen(this.element, "mousedown", (e) => this._onMouseDown(e));
     this._listen(this.element, "click", (e) => this._onMouseDown(e));
@@ -335,8 +372,23 @@ export class Editor extends EventTarget {
         return;
       case "insertFromPaste":
       case "insertFromDrop": {
+        // Cancel the event so the UA does not also insert into the buffer
+        // (and, for pastes, so no `paste` event follows); the shared guard
+        // in _pasteFromDataTransfer deduplicates UAs that dispatch both.
         e.preventDefault();
-        this._insertFromDataTransfer(e.dataTransfer);
+        this._pasteFromDataTransfer(e.dataTransfer);
+        return;
+      }
+      case "deleteContentBackward":
+      case "deleteContentForward": {
+        // Real key presses are applied to the buffer by the UA and mirrored
+        // from textupdate — handling them here as well would delete twice.
+        // Synthetic events (e.g. dispatched by browser extensions) never
+        // reach the buffer, so the deletion is performed here instead.
+        if (!e.isTrusted) {
+          e.preventDefault();
+          this._deleteFromBeforeInput(inputType);
+        }
         return;
       }
       case "deleteByCut":
@@ -361,10 +413,58 @@ export class Editor extends EventTarget {
         this.redo();
         return;
       default:
-        // EditContext-handled inputTypes (insertText, deleteContent*, …) are
+        // Remaining EditContext-handled inputTypes (insertText, …) are
         // applied to the buffer by the UA and mirrored in textupdate.
         return;
     }
+  }
+
+  /**
+   * Handle `paste` events that never produce beforeinput(insertFromPaste) —
+   * typically synthetic events dispatched by third-party code such as
+   * browser extensions (real pastes are consumed, and canceled, by the
+   * beforeinput handler before the paste event fires).
+   */
+  _onPaste(e) {
+    e.preventDefault();
+    this._pasteFromDataTransfer(e.clipboardData);
+  }
+
+  /**
+   * Shared insertion path for beforeinput(insertFromPaste/insertFromDrop)
+   * and the `paste` event. A real paste fires beforeinput first and is
+   * canceled there, so no `paste` event follows; synthetic paste events
+   * fire without beforeinput. The guard covers UAs that dispatch both for
+   * the same content, so it is inserted only once.
+   */
+  _pasteFromDataTransfer(dt) {
+    if (!dt || this._pasteGuard) return;
+    this._pasteGuard = true;
+    queueMicrotask(() => {
+      this._pasteGuard = false;
+    });
+    this._insertFromDataTransfer(dt);
+  }
+
+  /**
+   * Perform a deletion for a synthetic beforeinput(deleteContent*) event.
+   * The range is computed the way the UA would compute it (the whole
+   * selection, or one grapheme next to a collapsed caret) and then run
+   * through the same flat-edit mirroring as a buffer deletion.
+   */
+  _deleteFromBeforeInput(inputType) {
+    if (this.isComposing) return;
+    const backward = inputType === "deleteContentBackward";
+    const { from, to } = this._orderedSelection();
+    if (to > from) {
+      this._commitFlatEdit(from, to, "", from, from, null);
+      return;
+    }
+    const flat = this.map.flatText;
+    const a = backward ? previousGraphemeBoundary(flat, from) : from;
+    const b = backward ? from : nextGraphemeBoundary(flat, from);
+    if (a === b) return;
+    this._commitFlatEdit(a, b, "", a, a, null);
   }
 
   /**
@@ -654,7 +754,16 @@ export class Editor extends EventTarget {
     const text = e.text ?? e.updateText ?? "";
     const selA = e.selectionStart ?? a + text.length;
     const selB = e.selectionEnd ?? selA;
+    this._commitFlatEdit(a, b, text, selA, selB, "typing");
+  }
 
+  /**
+   * Apply a flat buffer-style edit [a, b) -> text to the model and finish
+   * the update (render, caret, history). Shared by the textupdate mirroring
+   * and by synthetic beforeinput events dispatched by third parties, which
+   * never reach the EditContext buffer.
+   */
+  _commitFlatEdit(a, b, text, selA, selB, mergeKey) {
     const changed = this._applyFlatEdit(a, b, text);
     this._afterMutation();
     const max = this.map.flatText.length;
@@ -674,7 +783,7 @@ export class Editor extends EventTarget {
     } else {
       this._setSelection(clamp(selA, max), clamp(selB, max));
     }
-    if (changed) this.history.record(this.doc, this.sel, "typing");
+    if (changed) this.history.record(this.doc, this.sel, mergeKey);
     this._afterRender();
     if (changed) this._emit("change");
   }
