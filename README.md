@@ -51,7 +51,14 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
 - **`beforeinput(insertCompositionText)` intentionally does not fire** on the element (per spec) —
   composition arrives exclusively through the EditContext's `compositionstart`/`textupdate`/
   `textformatupdate`/`compositionend` events.
-- **No native caret** outside editable elements (spec design): the editor renders its own blinking caret.
+- **No native caret or selection highlight is painted for EditContext hosts** (spec
+  design; verified in Chrome 154 by hiding the editor's `.ec-caret` — nothing remains).
+  The host element is not editable in the browser's eyes, so the library draws its own
+  blinking caret and restores the DOM selection for highlighting. Note for readers of old
+  demos: the original Edge/early-Chromium implementations *did* paint a native caret and
+  selection (the era of the W3C `native_selection_demo`, which contains no caret code and
+  documented "Caret is not drawn" once the behavior changed); the shipped spec-aligned
+  implementation removed that, which is why such demos show no caret today.
 - **No native object selection** for images/tables (spec design): the editor implements
   click-to-select with its own highlight, so Backspace/Delete and typing-over work on selected objects.
   Arrow keys select an object when stepping onto it (stepping off collapses the caret beside it), and
