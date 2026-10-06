@@ -229,6 +229,12 @@ export class PositionMap {
           range.collapse(true);
         }
       } else {
+        // Element boundary (paragraph start, inline-leaf edge): a range
+        // collapsed here spans the whole container box, so measure the
+        // nearest real character instead — the first following one
+        // (left-edge caret), else the last preceding one (right edge).
+        const charRect = charBoundaryRect(doc, point.node, point.offset);
+        if (charRect) return charRect;
         range.setStart(point.node, Math.min(point.offset, point.node.childNodes.length));
         range.collapse(true);
       }
@@ -244,6 +250,58 @@ export class PositionMap {
       return null;
     }
   }
+}
+
+/** First (or last) non-empty text node inside `node`, descending recursively. */
+function deepText(node, forward) {
+  if (node.nodeType === 3) return node.nodeValue.length > 0 ? node : null;
+  const kids = node.childNodes;
+  if (forward) {
+    for (let i = 0; i < kids.length; i++) {
+      const found = deepText(kids[i], true);
+      if (found) return found;
+    }
+  } else {
+    for (let i = kids.length - 1; i >= 0; i--) {
+      const found = deepText(kids[i], false);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Caret rect at an element-boundary DOM point: the left edge of the first
+ * character at/after child offset `offset`, or — when no text follows — the
+ * right edge of the last character before it. Returns null when there is no
+ * text to measure (empty paragraphs fall back to a collapsed range, which
+ * correctly reports the single line box).
+ */
+function charBoundaryRect(doc, el, offset) {
+  const kids = el.childNodes;
+  const from = Math.max(0, Math.min(offset, kids.length));
+  for (let i = from; i < kids.length; i++) {
+    const text = deepText(kids[i], true);
+    if (text) {
+      const range = doc.createRange();
+      range.setStart(text, 0);
+      range.setEnd(text, 1);
+      const r = range.getBoundingClientRect();
+      if (r && r.height > 0) return new DOMRect(r.left, r.top, 0, r.height);
+    }
+  }
+  for (let i = from - 1; i >= 0; i--) {
+    const text = deepText(kids[i], false);
+    if (text) {
+      const end = text.nodeValue.length;
+      const range = doc.createRange();
+      range.setStart(text, end - 1);
+      range.setEnd(text, end);
+      const r = range.getBoundingClientRect();
+      if (r && r.height > 0) return new DOMRect(r.right, r.top, 0, r.height);
+    }
+  }
+  return null;
 }
 
 /**
