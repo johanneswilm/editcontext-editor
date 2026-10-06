@@ -58,6 +58,14 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
   `textupdate.updateRangeStart/updateRangeEnd/text` and `textformatupdate.getTextFormats()`; older
   builds used `updateTextStart/updateTextEnd/updateText` and direct `rangeStart/underlineStyle`
   properties. The library accepts both.
+- **`beforeinput` on the host *is* cancelable — `preventDefault()` genuinely blocks the edit**
+  (verified in Chrome 154). `beforeinput` fires on the editing host *element* (not the EditContext
+  object) with `cancelable: true` for `insertText`, `insertFromPaste`, `deleteContent*`, formats,
+  etc.; canceling leaves the EditContext buffer untouched and no `textupdate` follows. What you
+  *cannot* cancel this way is composition: `compositionstart`/`textupdate`/`compositionend` fire on
+  the EditContext object after its buffer is already updated (`textupdate.cancelable` is true, but
+  canceling is a no-op — revert with `editContext.updateText()` if needed). Also, no `input` event
+  fires at all on EditContext hosts; `textupdate` is the only after-the-fact notification.
 
 ## Quick start
 
