@@ -38,15 +38,15 @@ it yet. The library throws a clear error (and `isEditContextSupported()` returns
 is missing, so you can feature-detect and fall back. See
 [MDN](https://developer.mozilla.org/en-US/docs/Web/API/EditContext#browser_compatibility).
 
-**Firefox (experimental, `dom.editcontext.enabled`):** rendering, typing, and IME work, but the UA's
-caret navigation on EditContext hosts is non-functional — ArrowLeft never moves, ArrowRight jumps
-block to block and wraps from the last table cell back to the first. This no longer matters for the
-default (custom) caret mode: arrow keys are intercepted on **every** browser and the caret/selection
-is moved in the editor's own flat model (`preventDefault` in `keydown`, `src/editor.js`
-`_arrowMoveModel`) — per-grapheme walks, object selection when stepping onto images/tables,
-cell-by-cell table traversal, and table escapes — so behavior is identical everywhere and immune to
-UA quirks. Only `caretMode: "native"` relies on the browser's own caret movement; there, Firefox's
-broken navigation shows raw, which is exactly what that mode is for.
+**Firefox (experimental, `dom.editcontext.enabled`):** rendering, typing, and IME work, and the
+native caret moves — but it gets **trapped inside tables**: with the browser's own caret
+(`caretMode: "native"`), ArrowLeft from a table cell never escapes the table (and ArrowRight wraps
+from the last cell back to the first). The default (custom) caret mode doesn't depend on UA
+navigation at all: arrow keys are intercepted on **every** browser and the caret/selection is moved
+in the editor's own flat model (`preventDefault` in `keydown`, `src/selection.js`) — per-grapheme
+walks, object selection when stepping onto images/tables, cell-by-cell table traversal in both
+directions, and table escapes — so behavior is identical everywhere and immune to quirks like the
+trapping above.
 
 ## Known Chromium issues and spec divergences
 
@@ -66,10 +66,14 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
   `textformatupdate`/`compositionend` events.
 - **No native object selection** for images/tables (spec design): the editor implements
   click-to-select with its own highlight, so Backspace/Delete and typing-over work on selected objects.
-  Arrow keys select an object when stepping onto it (stepping off collapses the caret beside it), and
-  Backspace/Delete *next to* a block object (table, block image) also selects it first — Word-style —
-  with only a second press deleting it (`src/editor.js` `_removeBlockLeaves`). Object selections cover
-  the block's DOM contents, so the browser paints a highlight over the object instead of a boundary bar.
+  Clicking in the margin beside a table or block image selects it too, so both are selectable without
+  touching the arrow keys. Arrow keys select an object when stepping onto it (stepping off collapses
+  the caret beside it), and Backspace/Delete *next to* a block object (table, block image) also
+  selects it first — Word-style — with only a second press deleting it (`src/editor.js`
+  `_removeBlockLeaves`). Object selections cover the block's DOM contents, so the browser paints a
+  highlight over the object instead of a boundary bar. All of this selection logic — movement,
+  object selection, click handling — lives in **`src/selection.js`** (~380 lines), so the cost of a
+  fully script-controlled selection on top of EditContext is visible in one file.
 - **Object selections don't survive in the EditContext** (Chromium quirk, verified in Chrome 154):
   pushing `updateSelection(start, end)` over an object character works, but after an author
   `updateText()` call Chrome asynchronously collapses the selection to its start. The editor therefore
@@ -227,14 +231,16 @@ JSON document model  <->  flat text (EditContext buffer)  <->  DOM
    Chromium would otherwise paint for the focused host — see "Known Chromium issues"), and caret
    *movement* is computed, not reacted to: arrow keys are intercepted on every UA, the target is
    calculated in the flat model (per-grapheme steps, object selection when stepping onto an
-   image/table, cell-by-cell table traversal, table escapes; vertical steps find their target with
-   `caretRangeFromPoint` and then go through the same placement), translated to a DOM position, and
-   the selection + caret are placed there by the editor itself. External placements (clicks, drags,
-   Home/End, word moves) arrive as DOM `selectionchange` and are mapped back to buffer offsets via
-   the position map. With `caretMode: "native"` the library steps aside: no caret drawing, no
-   arrow-key interception — the browser paints the caret for the DOM selection and moves it natively
-   (including its current quirks, which is exactly what that mode is for: demonstrating raw
-   EditContext caret behavior to browser developers).
+   image/table, cell-by-cell table traversal in both directions, table escapes; vertical steps find
+   their target with `caretRangeFromPoint` and then go through the same placement), translated to a
+   DOM position, and the selection + caret are placed there by the editor itself. External placements
+   (clicks, drags, Home/End, word moves) arrive as DOM `selectionchange` and are mapped back to
+   buffer offsets via the position map; margin clicks beside a table or block image become object
+   selections. All of this lives in **`src/selection.js`** (`SelectionController`, ~380 lines). With
+   `caretMode: "native"` the library steps aside: no caret drawing, no arrow-key interception — the
+   browser paints the caret for the DOM selection and moves it natively (including its current
+   quirks, which is exactly what that mode is for: demonstrating raw EditContext caret behavior to
+   browser developers).
 
 **Third-party input events.** Synthetic events dispatched by external code (e.g. browser extensions)
 never reach the EditContext buffer, so the `textupdate` mirroring never sees them. The editor therefore

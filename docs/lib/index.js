@@ -1,4 +1,5 @@
 export { Editor, createEditor, isEditContextSupported } from "./editor.js";
+export { SelectionController } from "./selection.js";
 export { createToolbar, COMMENT_FEATURES, FULL_FEATURES } from "./toolbar.js";
 export { render, PositionMap } from "./render.js";
 export {

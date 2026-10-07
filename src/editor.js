@@ -17,6 +17,10 @@
  * IME composition is fully supported: composition events, textformatupdate
  * decorations (the underline), and characterboundsupdate responses that let
  * the IME position its candidate window correctly.
+ *
+ * All selection logic — caret movement in the flat model, object selection,
+ * click-to-select, DOM-selection mapping — lives in selection.js
+ * (SelectionController).
  */
 import { normalizeDocument, cloneDoc, getNode, isInlineContainer, MARKS, getLinkMark } from "./schema.js";
 import { inlineLength, findAncestor, comparePaths } from "./document.js";
@@ -26,6 +30,7 @@ import { History } from "./history.js";
 import { parseHTML, parseText } from "./htmlparse.js";
 import { serializeHTML } from "./serialize.js";
 import { injectStyles } from "./styles.js";
+import { SelectionController } from "./selection.js";
 
 const INPUT_TYPE_TO_MARK = {
   formatBold: "bold",
@@ -129,6 +134,7 @@ export class Editor extends EventTarget {
     this._syncBuffer(true);
     this.history.seed(this.doc, this.sel);
     this._updatePlaceholder();
+    this.selection = new SelectionController(this);
 
     this._bindEvents();
   }
@@ -187,7 +193,7 @@ export class Editor extends EventTarget {
   // ------------------------------------------------------- selection helpers
 
   getSelection() {
-    return { ...this.sel };
+    return this.selection.get();
   }
 
   /** Set the selection from flat offsets (clamped to the document). */
@@ -198,10 +204,7 @@ export class Editor extends EventTarget {
   }
 
   _setSelection(anchor, head) {
-    this.sel = { anchor, head };
-    const start = Math.min(anchor, head);
-    const end = Math.max(anchor, head);
-    this.editContext.updateSelection(start, end);
+    this.selection.set(anchor, head);
   }
 
   _collapsed() {
@@ -216,307 +219,24 @@ export class Editor extends EventTarget {
   }
 
   _restoreDomSelection() {
-    const domSel = this.element.ownerDocument.getSelection();
-    if (!domSel) return;
-    // A selection covering whole block objects covers their contents, so
-    // the browser paints a highlight over the object; a bare element-
-    // boundary selection only draws a tall bar at the edge.
-    let anchorPoint = null;
-    let focusPoint = null;
-    const { from, to } = this._orderedSelection();
-    const blockSegs = this.map.segments.filter(
-      (s) => s.kind === "blockleaf" && s.start >= from && s.end <= to
-    );
-    if (blockSegs.length && blockSegs[0].start === from && blockSegs[blockSegs.length - 1].end === to) {
-      const first = blockSegs[0];
-      const last = blockSegs[blockSegs.length - 1];
-      anchorPoint =
-        this.sel.anchor <= this.sel.head
-          ? { node: first.dom, offset: 0 }
-          : { node: last.dom, offset: last.dom.childNodes.length };
-      focusPoint =
-        this.sel.anchor <= this.sel.head
-          ? { node: last.dom, offset: last.dom.childNodes.length }
-          : { node: first.dom, offset: 0 };
-    } else {
-      anchorPoint = this.map.flatToDomPoint(this.sel.anchor);
-      focusPoint = this.map.flatToDomPoint(this.sel.head);
-    }
-    if (!anchorPoint || !focusPoint) return;
-    const { anchor, head } = this.sel;
-    this._settingDomSelection = true;
-    try {
-      if (anchor <= head) {
-        domSel.setBaseAndExtent(anchorPoint.node, anchorPoint.offset, focusPoint.node, focusPoint.offset);
-      } else {
-        domSel.setBaseAndExtent(focusPoint.node, focusPoint.offset, anchorPoint.node, anchorPoint.offset);
-      }
-    } catch {
-      // Points may be briefly stale during re-render; ignore.
-    } finally {
-      this._settingDomSelection = false;
-    }
+    this.selection.restoreDom();
   }
 
   _onSelectionChange() {
-    if (this._settingDomSelection || !this.focused) return;
-    const domSel = this.element.ownerDocument.getSelection();
-    if (!domSel || domSel.rangeCount === 0) return;
-    let anchorFlat = this.map.domPointToFlat(domSel.anchorNode, domSel.anchorOffset);
-    let focusFlat = this.map.domPointToFlat(domSel.focusNode, domSel.focusOffset);
-    if (anchorFlat == null || focusFlat == null) return;
-    if (anchorFlat === this.sel.anchor && focusFlat === this.sel.head) return;
-
-    // External selection placement (clicks, drags, Home/End, word moves…):
-    // take the DOM selection as reported. Arrow keys never reach this code in
-    // custom caret mode — they are intercepted in _onKeyDown and applied from
-    // the model — and in native mode we deliberately keep the browser's
-    // landing spot untouched.
-    this.sel = { anchor: anchorFlat, head: focusFlat };
-    this.storedMarks = [];
-    const start = Math.min(anchorFlat, focusFlat);
-    const end = Math.max(anchorFlat, focusFlat);
-    this.editContext.updateSelection(start, end);
-    this._updateSelectedNode();
-    this._updateCaretAndBounds();
-    this._emit("selectionchange");
+    this.selection.onChange();
   }
 
   // -------------------------------------------- model-based arrow movement
-  // The single arrow-movement path in custom caret mode (all UAs): one step
-  // in the flat model, then the result is translated to a DOM position and
-  // applied from here. Objects are selected when stepped onto from adjacent
-  // text, tables are walked through cell by cell, and the caret escapes a
-  // table from its first cell. Vertical steps find their target with the
-  // UA's own hit testing (caretRangeFromPoint), then go through the same
-  // model placement.
-
-  _selectedObjectSeg() {
-    const lo = Math.min(this.sel.anchor, this.sel.head);
-    const hi = Math.max(this.sel.anchor, this.sel.head);
-    return (
-      this.map.segments.find(
-        (s) =>
-          (s.kind === "leaf" || s.kind === "blockleaf") && s.start === lo && s.end === hi
-      ) ?? null
-    );
-  }
-
-  _graphemeStep(f, seg, forward) {
-    const text = this.map.flatText.slice(seg.start, seg.end);
-    try {
-      this._segmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
-      const local = f - seg.start;
-      for (const { index, segment } of this._segmenter.segment(text)) {
-        if (forward && index === local) return seg.start + index + segment.length;
-        if (!forward && index + segment.length === local) return seg.start + index;
-      }
-    } catch {
-      // no segmenter: fall through to code-unit stepping
-    }
-    return forward ? Math.min(f + 1, seg.end) : Math.max(f - 1, seg.start);
-  }
-
-  _objectAtStart(f) {
-    return (
-      this.map.segments.find(
-        (s) => (s.kind === "leaf" || s.kind === "blockleaf") && s.start === f
-      ) ?? null
-    );
-  }
-
-  _tableAbuts(obj) {
-    return obj.kind === "blockleaf" && this.map.contentEndsAt(obj.start);
-  }
-
-  /** One ArrowRight step in flat space. */
-  _stepRight(f) {
-    const segs = this.map.segments;
-    const text = segs.find((s) => s.kind === "text" && s.start <= f && f < s.end);
-    if (text) {
-      const g = this._graphemeStep(f, text, true);
-      const obj = this._objectAtStart(g);
-      // Stepping onto an inline object selects it (Chromium semantics) —
-      // except an abutting table, which is visited collapsed first.
-      if (obj && !(obj.kind === "blockleaf" && this._tableAbuts(obj))) {
-        return { t: "select", seg: obj };
-      }
-      return { t: "rest", f: g };
-    }
-    const endSeg = segs.find((s) => s.kind === "text" && s.end === f);
-    const obj = this._objectAtStart(f);
-    if (endSeg) {
-      if (obj) return { t: "select", seg: obj }; // end of cell text: object char
-      const next = segs[segs.indexOf(endSeg) + 1];
-      if (next?.kind === "gap") {
-        const after = segs[segs.indexOf(next) + 1];
-        if (!after) return { t: "stay" };
-        if (after.kind === "leaf" || after.kind === "blockleaf") return { t: "select", seg: after };
-        return { t: "rest", f: after.start };
-      }
-      if (next && next.kind === "text") return { t: "rest", f: next.start };
-      return { t: "stay" };
-    }
-    if (obj) return { t: "select", seg: obj }; // beside an object
-    const gap = segs.find((s) => s.kind === "gap" && s.start <= f && f < s.end);
-    if (gap) {
-      const after = segs[segs.indexOf(gap) + 1];
-      if (!after) return { t: "stay" };
-      if (after.kind === "leaf" || after.kind === "blockleaf") return { t: "select", seg: after };
-      return { t: "rest", f: after.start };
-    }
-    return { t: "stay" };
-  }
-
-  /** One ArrowLeft step in flat space. */
-  _stepLeft(f) {
-    const segs = this.map.segments;
-    // A table's object char abuts its cell text: the same offset is both
-    // "end of the last cell" and the table's boundary. The boundary wins on
-    // the way out — the table is never walked back into from here.
-    const boundary = this._objectAtStart(f);
-    if (boundary && this._tableAbuts(boundary)) {
-      const target = this.map.escapeFlatBefore(boundary);
-      return target != null ? { t: "rest", f: target } : { t: "stay" };
-    }
-    const text = segs.find((s) => s.kind === "text" && s.start < f && f <= s.end);
-    if (text) return { t: "rest", f: this._graphemeStep(f, text, false) };
-    const startSeg = segs.find((s) => s.kind === "text" && s.start === f);
-    if (startSeg) {
-      const i = segs.indexOf(startSeg);
-      const prev = segs[i - 1];
-      if (prev?.kind === "gap") {
-        const before = segs[i - 2];
-        if (prev.action === "noop" || !before || before.kind === "text") {
-          if (!before) return { t: "stay" };
-          return { t: "rest", f: before.kind === "gap" ? before.start : before.end };
-        }
-        if (before.kind === "leaf") return { t: "select", seg: before };
-        if (before.kind === "blockleaf") {
-          // A block after a table: visit the position after it; an image:
-          // select it.
-          if (this._tableAbuts(before)) return { t: "rest", f: before.end };
-          return { t: "select", seg: before };
-        }
-        return { t: "stay" };
-      }
-      if (prev?.kind === "leaf") return { t: "select", seg: prev }; // after inline image
-      return { t: "stay" };
-    }
-    const obj = this._objectAtStart(f);
-    if (obj) {
-      if (this._tableAbuts(obj)) {
-        const target = this.map.escapeFlatBefore(obj);
-        return target != null ? { t: "rest", f: target } : { t: "stay" };
-      }
-      return { t: "rest", f: Math.max(f - 1, 0) }; // walk past a block image
-    }
-    const gap = segs.find((s) => s.kind === "gap" && s.start <= f && f < s.end);
-    if (gap) {
-      const before = segs[segs.indexOf(gap) - 1];
-      if (!before) return { t: "stay" };
-      if (before.kind === "gap") return { t: "rest", f: before.start };
-      if (before.kind === "leaf") return { t: "select", seg: before };
-      if (before.kind === "blockleaf") {
-        if (this._tableAbuts(before)) return { t: "rest", f: before.start }; // into the cells
-        return { t: "select", seg: before };
-      }
-      if (before.kind === "text") return { t: "rest", f: before.end };
-      return { t: "stay" };
-    }
-    return { t: "stay" };
-  }
+  // Implemented in selection.js (SelectionController.arrowMove) — arrow keys
+  // are intercepted in _onKeyDown and the target is computed in the flat
+  // model, so behavior is identical on every UA and immune to UA quirks.
 
   _arrowMoveModel(key, extend) {
-    const right = key === "ArrowRight";
-    const left = key === "ArrowLeft";
-    const selObj = this._selectedObjectSeg();
-    let edge;
-    if (selObj) {
-      if (right || left) {
-        // Stepping away from a selected object. Tables are never selected on
-        // the way out: arrowing left escapes them outright. Otherwise the
-        // press crosses the gap beside the object: an object on the far
-        // side gets selected directly (symmetric both ways), a text block
-        // on the right lands the caret at its start, and anything else (or
-        // nothing) collapses beside the object.
-        if (left && this._tableAbuts(selObj)) {
-          const target = this.map.escapeFlatBefore(selObj);
-          if (target != null) {
-            this._applySelection(extend ? this.sel.anchor : target, target);
-            return;
-          }
-        }
-        const segs = this.map.segments;
-        const i = segs.indexOf(selObj);
-        const gap = segs[i + (right ? 1 : -1)];
-        const beyond = gap?.kind === "gap" ? segs[i + (right ? 2 : -2)] : null;
-        if (beyond && (beyond.kind === "leaf" || beyond.kind === "blockleaf")) {
-          if (extend) {
-            this._applySelection(this.sel.anchor, left ? beyond.start : beyond.end);
-          } else {
-            this._applySelection(beyond.start, beyond.end);
-          }
-          return;
-        }
-        if (right && beyond?.kind === "text") {
-          this._applySelection(extend ? this.sel.anchor : beyond.start, beyond.start);
-          return;
-        }
-        const beside = left ? selObj.start : selObj.end;
-        this._applySelection(extend ? this.sel.anchor : beside, beside);
-        return;
-      }
-      edge = key === "ArrowUp" ? selObj.start : selObj.end - 1;
-    } else {
-      const lo = Math.min(this.sel.anchor, this.sel.head);
-      const hi = Math.max(this.sel.anchor, this.sel.head);
-      if (key === "ArrowUp") edge = lo;
-      else if (key === "ArrowDown") edge = hi;
-      else if (extend) edge = this.sel.head;
-      else edge = right ? hi : lo;
-    }
-    let result = null;
-    if (right || left) {
-      result = right ? this._stepRight(edge) : this._stepLeft(edge);
-    } else {
-      // Vertical: ask the UA's hit testing for the point above/below the caret.
-      const r = this.map.caretRectAt(edge);
-      const doc = this.element.ownerDocument;
-      if (r && typeof doc.caretRangeFromPoint === "function") {
-        const y = key === "ArrowUp" ? r.top - 1 : r.bottom + 1;
-        try {
-          const range = doc.caretRangeFromPoint(r.left, y);
-          const nf = range && this.map.domPointToFlat(range.startContainer, range.startOffset);
-          if (nf != null && nf !== edge) result = { t: "rest", f: nf };
-        } catch {
-          // ignore and stay
-        }
-      }
-    }
-    if (!result || result.t === "stay") return;
-    if (result.t === "select") {
-      // Stepping onto an object selects it — the same state as click-select.
-      const seg = result.seg;
-      if (extend) this._applySelection(this.sel.anchor, seg.end);
-      else this._applySelection(seg.start, seg.end);
-      return;
-    }
-    // rest
-    if (extend) this._applySelection(this.sel.anchor, result.f);
-    else this._applySelection(result.f, result.f);
+    this.selection.arrowMove(key, extend);
   }
 
   _applySelection(anchor, head) {
-    this.sel = { anchor, head };
-    this.storedMarks = [];
-    const start = Math.min(anchor, head);
-    const end = Math.max(anchor, head);
-    this.editContext.updateSelection(start, end);
-    this._restoreDomSelection();
-    this._updateSelectedNode();
-    this._updateCaretAndBounds();
-    this._emit("selectionchange");
+    this.selection.apply(anchor, head);
   }
 
   // ------------------------------------------------------------ caret & IME
@@ -879,29 +599,12 @@ export class Editor extends EventTarget {
    * Clicking a link must not navigate.
    */
   _onMouseDown(e) {
-    if (!(e.target instanceof Element)) return;
-    const anchor = e.target.closest("a");
-    if (anchor && this.element.contains(anchor)) {
-      if (e.type === "click") e.preventDefault();
-      return;
-    }
-    if (e.button !== 0) return;
-    if (e.target.tagName !== "IMG" || !this.element.contains(e.target)) return;
-    const figure = e.target.closest("figure");
-    const seg =
-      this.map.segments.find((s) => s.dom === e.target) ??
-      (figure ? this.map.segments.find((s) => s.kind === "blockleaf" && s.dom === figure) : null);
-    if (!seg) return;
-    e.preventDefault();
-    this.element.focus();
-    this._setSelection(seg.start, seg.end);
-    this._restoreDomSelection();
-    this._updateSelectedNode();
-    this._updateCaretAndBounds();
-    this._emit("selectionchange");
+    this.selection.onMouseDown(e);
   }
 
   _onKeyDown(e) {
+    // A keypress ends any pending click context for margin-click selection.
+    this.selection.discardMouse();
     // Custom caret mode: the browser never moves the caret. Intercept the
     // arrow keys on every UA, compute the target in the flat model, and
     // place the DOM selection + caret there ourselves (_arrowMoveModel).
@@ -1691,6 +1394,7 @@ export class Editor extends EventTarget {
     this.focused = false;
     this.element.classList.remove("ec-focused");
     this.caret.style.display = "none";
+    this.selection.discardMouse();
     this._emit("blur");
   }
 
