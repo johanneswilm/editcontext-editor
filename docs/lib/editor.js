@@ -110,6 +110,7 @@ export class Editor extends EventTarget {
     this.sel = { anchor: 0, head: 0 }; // flat offsets
     this.storedMarks = [];
     this.isComposing = false;
+    this.compositionRange = null; // { start, end } in flat offsets, set from textupdate
     this.imeFormats = [];
     this.focused = false;
     this._settingDomSelection = false;
@@ -252,12 +253,17 @@ export class Editor extends EventTarget {
       this.caret.style.display = "none";
       return;
     }
-    const show = this.focused && this._collapsed();
+    const show = this.focused && (this._collapsed() || this.isComposing);
     if (!show) {
       this.caret.style.display = "none";
       return;
     }
-    const rect = this.map.caretRectAt(Math.min(this.sel.anchor, this.sel.head));
+    // While composing with a non-collapsed (selected) preedit — some IMEs on
+    // Windows/macOS report one — the caret still sits at the focus end.
+    const at = this.isComposing && !this._collapsed()
+      ? Math.max(this.sel.anchor, this.sel.head)
+      : Math.min(this.sel.anchor, this.sel.head);
+    const rect = this.map.caretRectAt(at);
     if (!rect) {
       this.caret.style.display = "none";
       return;
@@ -285,20 +291,33 @@ export class Editor extends EventTarget {
           selectionRect = range.getBoundingClientRect();
         }
       }
-      selectionRect ??= this.map.rectForOffset(Math.min(this.sel.anchor, this.sel.head));
+      // The IME anchors its candidate window to this rect (Linux IBus uses
+      // nothing else), so a collapsed selection must resolve through the
+      // caret geometry — including beside block objects — not a raw offset.
+      selectionRect ??= this.map.caretRectAt(Math.min(this.sel.anchor, this.sel.head));
       ec.updateSelectionBounds(selectionRect && selectionRect.height > 0 ? selectionRect : containerRect);
     } catch {
       // Bounds are advisory; never crash on them.
     }
   }
 
+  /**
+   * Answer the IME's request for character rectangles. One rect per code
+   * unit (grapheme clusters report the same rect for each unit), resolved
+   * through the DOM points so decorated composition text measures correctly.
+   */
   _onCharacterBoundsUpdate(e) {
     const rects = [];
     const text = this.map.flatText;
     let o = e.rangeStart;
     while (o < e.rangeEnd && rects.length < 1000) {
       const cpLen = o < text.length && text.codePointAt(o) > 0xffff ? 2 : 1;
-      rects.push(this.map.rectForOffset(o) ?? this.element.getBoundingClientRect());
+      const rect =
+        this.map.charRectAt(o) ??
+        this.map.caretRectAt(o) ??
+        this.element.getBoundingClientRect();
+      rects.push(rect);
+      if (cpLen === 2) rects.push(rect);
       o += cpLen;
     }
     try {
@@ -308,6 +327,12 @@ export class Editor extends EventTarget {
     }
   }
 
+  /**
+   * Re-render when the composition decorations change. Identical repeats
+   * (typing-booster re-sends its formats on every keystroke) are skipped:
+   * a mid-composition DOM teardown is the riskiest moment for the position
+   * map, so it should not happen more often than necessary.
+   */
   _onTextFormatUpdate(e) {
     let formats = [];
     if (typeof e.getTextFormats === "function") {
@@ -322,7 +347,7 @@ export class Editor extends EventTarget {
         },
       ];
     }
-    this.imeFormats = formats
+    const next = formats
       .filter((f) => f && f.rangeEnd > f.rangeStart)
       .map((f) => ({
         rangeStart: f.rangeStart,
@@ -330,20 +355,37 @@ export class Editor extends EventTarget {
         underlineStyle: f.underlineStyle,
         underlineThickness: f.underlineThickness,
       }));
+    if (JSON.stringify(next) === JSON.stringify(this.imeFormats)) return;
+    this.imeFormats = next;
     // Re-render decorations only; the text is unchanged.
+    this._ensureMapFresh();
     this.map = render(this.doc, this.element, { imeFormats: this.imeFormats });
     this.element.appendChild(this.caret);
     this._restoreDomSelection();
     this._updateCaretAndBounds();
   }
 
+  /**
+   * The map references DOM nodes; a mid-composition re-render that went
+   * wrong (or a UA-side DOM mutation) can leave it pointing at detached
+   * nodes, after which every measurement — caret, bounds, selection
+   * restore — silently reports zeros. Detect that and rebuild.
+   */
+  _ensureMapFresh() {
+    if (this.map.points.some((p) => !p.node.isConnected)) {
+      this._afterMutation();
+    }
+  }
+
   _onCompositionStart() {
     this.isComposing = true;
+    this.compositionRange = null;
     this._emit("compositionstart");
   }
 
   _onCompositionEnd() {
     this.isComposing = false;
+    this.compositionRange = null;
     this.imeFormats = [];
     this._afterMutation();
     this._afterRender();
@@ -759,6 +801,11 @@ export class Editor extends EventTarget {
     const text = e.text ?? e.updateText ?? "";
     const selA = e.selectionStart ?? a + text.length;
     const selB = e.selectionEnd ?? selA;
+    if (this.isComposing) {
+      // The preedit range, for rendering the composition highlight; the
+      // model selection itself tracks the composition cursor.
+      this.compositionRange = { start: a, end: a + text.length };
+    }
     this._commitFlatEdit(a, b, text, selA, selB, "typing");
   }
 
@@ -1156,6 +1203,7 @@ export class Editor extends EventTarget {
   }
 
   _afterRender() {
+    this._ensureMapFresh();
     this._restoreDomSelection();
     this._updateSelectedNode();
     this._updateCaretAndBounds();
@@ -1189,7 +1237,11 @@ export class Editor extends EventTarget {
     const max = next.length;
     const start = clamp(Math.min(this.sel.anchor, this.sel.head), max);
     const end = clamp(Math.max(this.sel.anchor, this.sel.head), max);
-    this.editContext.updateSelection(start, end);
+    // While composing the buffer selection belongs to the IME; pushing ours
+    // would make Chromium adopt it mid-composition and derail the preedit.
+    if (!this.isComposing) {
+      this.editContext.updateSelection(start, end);
+    }
   }
 
   _updatePlaceholder() {

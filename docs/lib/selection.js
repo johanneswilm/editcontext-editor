@@ -33,7 +33,9 @@ export class SelectionController {
     this.ed.sel = { anchor, head };
     const start = Math.min(anchor, head);
     const end = Math.max(anchor, head);
-    this.ed.editContext.updateSelection(start, end);
+    if (!this.ed.isComposing) {
+      this.ed.editContext.updateSelection(start, end);
+    }
   }
 
   /** Set the model selection and render it: DOM selection, highlight, caret. */
@@ -42,7 +44,9 @@ export class SelectionController {
     this.ed.storedMarks = [];
     const start = Math.min(anchor, head);
     const end = Math.max(anchor, head);
-    this.ed.editContext.updateSelection(start, end);
+    if (!this.ed.isComposing) {
+      this.ed.editContext.updateSelection(start, end);
+    }
     this.restoreDom();
     this.ed._updateSelectedNode();
     this.ed._updateCaretAndBounds();
@@ -59,14 +63,18 @@ export class SelectionController {
     const ed = this.ed;
     const domSel = ed.element.ownerDocument.getSelection();
     if (!domSel) return;
+    // During composition the DOM selection highlights the preedit range so
+    // the user sees what is being composed; the model selection tracks the
+    // composition cursor separately.
+    const comp = ed.isComposing && ed.compositionRange ? ed.compositionRange : null;
+    const from = comp ? comp.start : Math.min(ed.sel.anchor, ed.sel.head);
+    const to = comp ? comp.end : Math.max(ed.sel.anchor, ed.sel.head);
     let anchorPoint = null;
     let focusPoint = null;
-    const from = Math.min(ed.sel.anchor, ed.sel.head);
-    const to = Math.max(ed.sel.anchor, ed.sel.head);
     const blockSegs = ed.map.segments.filter(
       (s) => s.kind === "blockleaf" && s.start >= from && s.end <= to
     );
-    if (blockSegs.length && blockSegs[0].start === from && blockSegs[blockSegs.length - 1].end === to) {
+    if (!comp && blockSegs.length && blockSegs[0].start === from && blockSegs[blockSegs.length - 1].end === to) {
       const first = blockSegs[0];
       const last = blockSegs[blockSegs.length - 1];
       anchorPoint =
@@ -78,14 +86,14 @@ export class SelectionController {
           ? { node: last.dom, offset: last.dom.childNodes.length }
           : { node: first.dom, offset: 0 };
     } else {
-      anchorPoint = ed.map.flatToDomPoint(ed.sel.anchor);
-      focusPoint = ed.map.flatToDomPoint(ed.sel.head);
+      anchorPoint = ed.map.flatToDomPoint(from);
+      focusPoint = ed.map.flatToDomPoint(to);
     }
     if (!anchorPoint || !focusPoint) return;
-    const { anchor, head } = ed.sel;
+    const forward = comp ? true : ed.sel.anchor <= ed.sel.head;
     ed._settingDomSelection = true;
     try {
-      if (anchor <= head) {
+      if (forward) {
         domSel.setBaseAndExtent(anchorPoint.node, anchorPoint.offset, focusPoint.node, focusPoint.offset);
       } else {
         domSel.setBaseAndExtent(focusPoint.node, focusPoint.offset, anchorPoint.node, anchorPoint.offset);
@@ -108,6 +116,10 @@ export class SelectionController {
   onChange() {
     const ed = this.ed;
     if (ed._settingDomSelection || !ed.focused) return;
+    // While composing, the IME owns the selection; transient DOM selection
+    // changes caused by our own re-renders must not feed back into the model
+    // (a detached-node selectionchange would land the caret at offset 0).
+    if (ed.isComposing) return;
     const domSel = ed.element.ownerDocument.getSelection();
     if (!domSel || domSel.rangeCount === 0) return;
     const anchorFlat = ed.map.domPointToFlat(domSel.anchorNode, domSel.anchorOffset);

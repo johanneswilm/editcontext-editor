@@ -38,7 +38,7 @@ export class PositionMap {
     this.segments = [];
     /** Canonical DOM points: { flat, node, offset } sorted by flat. */
     this.points = [];
-    this._textSegByNode = new Map();
+    this._textSegByNode = new Map(); // text node -> { start, end } flat range it covers
     this._pointIndex = new Map(); // node -> Map(offset -> flat)
     this._blockEnds = new Map(); // element -> flat offset of its content end
   }
@@ -216,8 +216,10 @@ export class PositionMap {
   /** DOM point -> flat offset, or null when the point is outside the render. */
   domPointToFlat(node, offset) {
     if (node.nodeType === 3) {
-      const seg = this._textSegByNode.get(node);
-      if (seg) return seg.start + Math.min(offset, seg.end - seg.start);
+      // Text node (possibly one split off by IME decoration): the map entry
+      // gives the flat range this node actually covers.
+      const run = this._textSegByNode.get(node);
+      if (run) return run.start + Math.min(offset, run.end - run.start);
       return null;
     }
     const direct = this._pointIndex.get(node)?.get(offset);
@@ -254,6 +256,24 @@ export class PositionMap {
     }
     const point = this.flatToDomPoint(o);
     return this.rectForPoint(point);
+  }
+
+  /**
+   * DOM rect covering the code unit starting at flat offset `o` — the IME
+   * character-bounds unit. Resolves through the (possibly IME-decorated,
+   * split) text nodes so composition text measures correctly; falls back to
+   * the generic offset rect for leaves, block leaves and boundaries.
+   */
+  charRectAt(o) {
+    const seg = this.segAt(o);
+    if (seg?.kind === "text") {
+      for (const [node, run] of this._textSegByNode) {
+        if (node.isConnected && run.start <= o && o < run.end) {
+          return this.rectForPoint({ node, offset: o - run.start });
+        }
+      }
+    }
+    return this.rectForOffset(o);
   }
 
   /** DOM rect for a DOM point (text offset or element boundary). */
@@ -478,12 +498,23 @@ export function render(doc, container, { imeFormats = [] } = {}) {
           inlineOffset,
           dom: null,
         };
-        const textNode = applyTextRun(ownerDoc, el, child, imeFormats, seg);
-        seg.dom = textNode;
-        map._textSegByNode.set(textNode, seg);
+        const { parts } = applyTextRun(ownerDoc, el, child, imeFormats, seg);
+        // Decorate first: IME decoration splits the text node, and the map
+        // must reference the nodes that are actually in the DOM.
+        seg.dom = parts[0].node;
         map.addSegment(seg);
+        for (const part of parts) {
+          map._textSegByNode.set(part.node, {
+            start: seg.start + part.from,
+            end: seg.start + part.to,
+          });
+        }
         map.flatText += child.text;
-        for (let i = 0; i <= child.text.length; i++) map.addPoint(flat + i, textNode, i);
+        for (const part of parts) {
+          for (let i = part.from; i <= part.to; i++) {
+            map.addPoint(flat + i, part.node, i - part.from);
+          }
+        }
         flat += child.text.length;
         inlineOffset += child.text.length;
       } else if (child.type === "image" || child.type === "hard_break") {
@@ -591,35 +622,44 @@ function applyTextRun(ownerDoc, el, child, imeFormats, seg) {
     top = a;
   }
   el.appendChild(top);
-  decorateIme(ownerDoc, el, inner, seg, imeFormats);
-  return inner;
+  const parts = decorateIme(ownerDoc, el, inner, seg, imeFormats);
+  return { inner, parts };
 }
 
-/** Split a text node where IME composition formats apply and wrap those parts. */
+/**
+ * Split a text node where IME composition formats apply and wrap those parts.
+ * Returns the text nodes that ended up in the DOM, each with the run-local
+ * [from, to) character range it covers, so the position map can reference
+ * the real (attached) nodes after the split.
+ */
 function decorateIme(ownerDoc, el, textNode, seg, imeFormats) {
+  const len = textNode.nodeValue.length;
   const spans = [];
   for (const f of imeFormats) {
     const s = Math.max(f.rangeStart, seg.start);
     const e = Math.min(f.rangeEnd, seg.end);
     if (s < e) spans.push([s - seg.start, e - seg.start, f]);
   }
-  if (spans.length === 0) return;
+  if (spans.length === 0) return [{ node: textNode, from: 0, to: len }];
   spans.sort((a, b) => a[0] - b[0]);
 
   const text = textNode.nodeValue;
   const parts = [];
   let cursor = 0;
   for (const [s, e, f] of spans) {
-    if (s > cursor) parts.push({ text: text.slice(cursor, s), format: null });
-    parts.push({ text: text.slice(s, e), format: f });
+    if (s > cursor) parts.push({ text: text.slice(cursor, s), format: null, from: cursor, to: s });
+    parts.push({ text: text.slice(s, e), format: f, from: s, to: e });
     cursor = Math.max(cursor, e);
   }
-  if (cursor < text.length) parts.push({ text: text.slice(cursor), format: null });
+  if (cursor < text.length) {
+    parts.push({ text: text.slice(cursor), format: null, from: cursor, to: text.length });
+  }
 
   const parent = textNode.parentNode;
   const anchor = ownerDoc.createComment("ime");
   parent.insertBefore(anchor, textNode);
   parent.removeChild(textNode);
+  const result = [];
   for (const part of parts) {
     if (part.text === "") continue;
     const node = ownerDoc.createTextNode(part.text);
@@ -638,8 +678,10 @@ function decorateIme(ownerDoc, el, textNode, seg, imeFormats) {
     } else {
       parent.insertBefore(node, anchor);
     }
+    result.push({ node, from: part.from, to: part.to });
   }
   parent.removeChild(anchor);
+  return result;
 }
 
 function makeImage(ownerDoc, attrs, className) {
