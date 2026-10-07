@@ -280,9 +280,12 @@ export class Editor extends EventTarget {
       this._arrowKeyAt && Date.now() - this._arrowKeyAt.time < 1000 ? this._arrowKeyAt.key : null;
     this._arrowKeyAt = null;
     if (viaArrow && anchorFlat === focusFlat) {
-      const seg =
-        this._objectSegAt(anchorFlat) ??
-        (this.map.segAt(anchorFlat)?.kind === "gap" ? this._objectSegBeside(anchorFlat) : null);
+      let seg = this._objectSegAt(anchorFlat);
+      let atGap = false;
+      if (!seg && this.map.segAt(anchorFlat)?.kind === "gap") {
+        seg = this._objectSegBeside(anchorFlat);
+        atGap = !!seg;
+      }
       if (seg) {
         const wasSelected =
           Math.min(this.sel.anchor, this.sel.head) === seg.start &&
@@ -297,8 +300,7 @@ export class Editor extends EventTarget {
         // Inline leaves and gap-separated block images keep the direct
         // select-on-step behavior.
         const abutting =
-          seg.kind === "blockleaf" &&
-          (viaArrow === "ArrowLeft" || viaArrow === "ArrowRight")
+          seg.kind === "blockleaf" && !atGap && (viaArrow === "ArrowLeft" || viaArrow === "ArrowRight")
             ? this.map.segments.find(
                 (s) => (s.kind === "text" || s.kind === "leaf") && s.end === anchorFlat
               )
@@ -335,6 +337,64 @@ export class Editor extends EventTarget {
           }
           // Otherwise keep the collapsed caret: the visit, or stepping off
           // a selection that was already made.
+        } else if (atGap) {
+          // Collapsed on a gap next to an object. Stepping toward an object
+          // selects it, except when arrowing left into a table — there the
+          // caret walks through the cell contents instead. Stepping away
+          // from a selected object selects the next object in that
+          // direction; coming from a table's abutting text and moving away
+          // still selects the table (the caret was at its boundary).
+          const toward = (seg.start === anchorFlat) === (viaArrow === "ArrowRight");
+          const abText =
+            seg.kind === "blockleaf"
+              ? this.map.segments.find(
+                  (s) => (s.kind === "text" || s.kind === "leaf") && s.end === seg.start
+                )
+              : null;
+          const prev = Math.min(this.sel.anchor, this.sel.head);
+          const fromAbuttingText = !!abText && prev >= abText.start && prev <= abText.end;
+          const walkIntoTable =
+            toward && !!abText && viaArrow === "ArrowLeft" && !fromAbuttingText;
+          if (!toward && wasSelected) {
+            const far = this.map.segments.find(
+              (s) =>
+                s.dom &&
+                (s.kind === "leaf" || s.kind === "blockleaf") &&
+                ((viaArrow === "ArrowRight" && s.start === anchorFlat + 1) ||
+                  (viaArrow === "ArrowLeft" && s.end === anchorFlat - 1))
+            );
+            if (far) {
+              this.sel = { anchor: far.start, head: far.end };
+              this.storedMarks = [];
+              this.editContext.updateSelection(far.start, far.end);
+              this._restoreDomSelection();
+              this._updateSelectedNode();
+              this._updateCaretAndBounds();
+              this._emit("selectionchange");
+              return;
+            }
+            // else collapse
+          } else if (!toward && !wasSelected && fromAbuttingText) {
+            this.sel = { anchor: seg.start, head: seg.end };
+            this.storedMarks = [];
+            this.editContext.updateSelection(seg.start, seg.end);
+            this._restoreDomSelection();
+            this._updateSelectedNode();
+            this._updateCaretAndBounds();
+            this._emit("selectionchange");
+            return;
+          } else if (toward && !wasSelected && !walkIntoTable) {
+            this.sel = { anchor: seg.start, head: seg.end };
+            this.storedMarks = [];
+            this.editContext.updateSelection(seg.start, seg.end);
+            this._restoreDomSelection();
+            this._updateSelectedNode();
+            this._updateCaretAndBounds();
+            this._emit("selectionchange");
+            return;
+          }
+          // Otherwise keep the collapsed caret: walking into a table, a
+          // step-off beside the object, or no object in that direction.
         } else if (!wasSelected) {
           this.sel = { anchor: seg.start, head: seg.end };
           this.storedMarks = [];

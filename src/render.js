@@ -68,6 +68,15 @@ export class PositionMap {
   }
 
   /**
+   * True when text/leaf content ends exactly at `o` — a table's cell text
+   * abuts its object character, so `o` is both "content end" and "object
+   * start".
+   */
+  contentEndsAt(o) {
+    return this.segments.some((s) => (s.kind === "text" || s.kind === "leaf") && s.end === o);
+  }
+
+  /**
    * Escape target for arrowing left out of a table: the flat offset of the
    * gap before the table's first content, where the caret lands at the end
    * of the block preceding the table. Null when there is no such gap.
@@ -319,6 +328,25 @@ export class PositionMap {
         }
       }
       return new DOMRect(r.left, r.top, 0, r.height);
+    }
+    if (seg?.kind === "gap") {
+      // Right after a block object the caret sits at the block's top-right,
+      // one line tall — not inside the block (rectForOffset would resolve
+      // backward into the block's last character).
+      const i = this.segments.indexOf(seg);
+      const prev = this.segments[i - 1];
+      if (prev?.kind === "blockleaf" && prev.dom) {
+        const r = prev.dom.getBoundingClientRect();
+        const parent = prev.dom.parentElement;
+        if (parent) {
+          const idx = Array.prototype.indexOf.call(parent.childNodes, prev.dom);
+          const line = charBoundaryRect(prev.dom.ownerDocument, parent, idx + 1);
+          if (line && line.height > 0 && line.height < r.height) {
+            return new DOMRect(r.right, r.top, 0, line.height);
+          }
+        }
+        return new DOMRect(r.right, r.top, 0, r.height);
+      }
     }
     return this.rectForOffset(o);
   }
