@@ -263,4 +263,4 @@ npm run demo         # serves the repo at http://localhost:8080 — open /docs/
 
 ## License
 
-MIT
+GNU Lesser General Public License v3.0
