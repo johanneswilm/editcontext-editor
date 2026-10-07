@@ -8,6 +8,9 @@ schema; all text input — physical keyboard, IME composition, emoji pickers, di
 EditContext, which is exactly what that API was designed for.
 
 **[Live demo (GitHub Pages)](https://johanneswilm.github.io/editcontext-editor/)** — see `docs/`.
+The demo has a **caret-mode switch**: *JS-managed* (the library draws and moves the caret) vs.
+*browser-native* (the UA draws and moves the caret — `?caret=native` in the URL). Use it to compare
+what the browser does on its own with what the library adds on top.
 
 ## Features
 
@@ -42,6 +45,8 @@ Firefox and moves the caret/selection in its own model on arrow keys (`preventDe
 `src/editor.js` `_arrowMoveModel`), reproducing the same semantics as Chromium: per-grapheme walks,
 object selection when stepping onto images/tables, cell-by-cell table traversal, and escapes. Override
 with the `uaBrokenArrows` option (also useful for testing the model path in other browsers).
+Both the model movement and all other caret interception are off in `caretMode: "native"` — there the
+browser is fully in charge of the caret, broken navigation included.
 
 ## Known Chromium issues and spec divergences
 
@@ -134,6 +139,7 @@ console.log(editor.getHTML());
 | `content` | Initial document: JSON object, JSON string, or HTML string. |
 | `placeholder` | Placeholder text shown when the document is empty. |
 | `enterKeyHint` | Value for the `enterkeyhint` attribute. |
+| `caretMode` | `"custom"` (default) — the library draws the caret and manages caret movement; `"native"` — the browser draws and moves the caret, no arrow interception. |
 | `injectStyles` | Set `false` to skip injecting the default stylesheet (use `EDITOR_CSS` yourself). |
 
 ### Content IO
@@ -220,7 +226,10 @@ JSON document model  <->  flat text (EditContext buffer)  <->  DOM
 5. The caret is drawn by the library (`caret-color: transparent` suppresses the native caret
    Chromium would otherwise paint for the focused host — see "Known Chromium issues"); text
    selection uses the native selection over the rendered DOM, mapped back to buffer offsets
-   via the position map.
+   via the position map. With `caretMode: "native"` the library steps aside: no caret drawing,
+   no arrow-key interception, no arrow-driven object selection — the browser paints the caret
+   for the DOM selection and moves it natively (including its current quirks, which is exactly
+   what that mode is for: demonstrating raw EditContext caret behavior to browser developers).
 
 **Third-party input events.** Synthetic events dispatched by external code (e.g. browser extensions)
 never reach the EditContext buffer, so the `textupdate` mirroring never sees them. The editor therefore

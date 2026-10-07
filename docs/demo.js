@@ -11,6 +11,22 @@ if (!isEditContextSupported()) {
   $("support-banner").hidden = false;
 }
 
+// Caret mode: "custom" (default) has the library draw and move the caret;
+// "native" leaves caret drawing and movement entirely to the browser.
+// Selected via the header switch, persisted in the URL (?caret=native).
+const caretMode =
+  new URLSearchParams(location.search).get("caret") === "native" ? "native" : "custom";
+{
+  const select = $("caret-mode");
+  select.value = caretMode;
+  select.addEventListener("change", () => {
+    const url = new URL(location.href);
+    if (select.value === "native") url.searchParams.set("caret", "native");
+    else url.searchParams.delete("caret");
+    location.href = url.href;
+  });
+}
+
 const EXAMPLE_DOC = {
   type: "doc",
   children: [
@@ -90,6 +106,7 @@ const full = new Editor({
   content: EXAMPLE_DOC,
   placeholder: "Type something…",
   enterKeyHint: "enter",
+  caretMode,
 });
 $("toolbar-full").appendChild(createToolbar(full));
 
@@ -285,6 +302,7 @@ const comment = new Editor({
   element: $("editor-comment"),
   placeholder: "Leave a comment… (select text for formatting)",
   enterKeyHint: "enter",
+  caretMode,
 });
 $("toolbar-comment").appendChild(
   createToolbar(comment, { features: COMMENT_FEATURES, blockTypes: [2, 3] })
@@ -300,4 +318,4 @@ $("comment-post").addEventListener("click", () => {
 });
 
 // Demo hooks for automated testing / debugging.
-window.__demo = { full, comment };
+window.__demo = { full, comment, caretMode };

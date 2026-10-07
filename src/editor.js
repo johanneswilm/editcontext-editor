@@ -83,11 +83,23 @@ export class Editor extends EventTarget {
     this.element.setAttribute("tabindex", "0");
     this.element.setAttribute("role", "textbox");
     this.element.setAttribute("aria-multiline", "true");
+    // Caret handling: "custom" (default) draws the caret in JS and manages
+    // caret movement (arrow-key object selection, model-based movement on
+    // UAs with broken native navigation); "native" leaves everything about
+    // the caret — drawing and movement — to the browser.
+    const caretMode = options.caretMode ?? "custom";
+    if (caretMode !== "custom" && caretMode !== "native") {
+      throw new Error(`Unknown caretMode ${JSON.stringify(caretMode)} — expected "custom" or "native"`);
+    }
+    this._nativeCaret = caretMode === "native";
+    if (this._nativeCaret) this.element.classList.add("ec-native-caret");
     // Firefox's experimental EditContext does not implement caret navigation
     // (ArrowLeft is dead, ArrowRight wraps inside tables): move in the model
     // there instead of relying on the UA. Override via options for testing.
+    // In native caret mode the browser is in charge, so never intercept.
     this._uaBrokenArrows =
-      options.uaBrokenArrows ?? /firefox/i.test(navigator.userAgent);
+      !this._nativeCaret &&
+      (options.uaBrokenArrows ?? /firefox/i.test(navigator.userAgent));
     if (options.placeholder) {
       this.element.dataset.ecPlaceholder = options.placeholder;
     }
@@ -175,7 +187,7 @@ export class Editor extends EventTarget {
     this.caret.remove();
     this._selectedNode?.classList?.remove("ec-selected");
     this._selectedNode = null;
-    this.element.classList.remove("ec-editor", "ec-focused", "ec-show-placeholder", "ec-is-empty");
+    this.element.classList.remove("ec-editor", "ec-focused", "ec-show-placeholder", "ec-is-empty", "ec-native-caret");
     this._emit("destroy");
   }
 
@@ -282,7 +294,11 @@ export class Editor extends EventTarget {
     // a selected object collapses the caret beside it instead. Only arrow
     // keys trigger this: a click next to an object keeps a plain caret.
     const viaArrow =
-      this._arrowKeyAt && Date.now() - this._arrowKeyAt.time < 1000 ? this._arrowKeyAt.key : null;
+      this._nativeCaret || !this._arrowKeyAt
+        ? null
+        : Date.now() - this._arrowKeyAt.time < 1000
+          ? this._arrowKeyAt.key
+          : null;
     this._arrowKeyAt = null;
     if (viaArrow && anchorFlat === focusFlat) {
       let seg = this._objectSegAt(anchorFlat);
@@ -646,6 +662,11 @@ export class Editor extends EventTarget {
   }
 
   _updateCaret() {
+    if (this._nativeCaret) {
+      // The browser paints the caret for the DOM selection; never ours.
+      this.caret.style.display = "none";
+      return;
+    }
     const show = this.focused && this._collapsed();
     if (!show) {
       this.caret.style.display = "none";
@@ -1017,8 +1038,11 @@ export class Editor extends EventTarget {
 
   _onKeyDown(e) {
     // Remember arrow keys so the selectionchange handler can tell caret
-    // movement from a click (see _onSelectionChange).
-    if (e.key?.startsWith("Arrow")) this._arrowKeyAt = { key: e.key, time: Date.now() };
+    // movement from a click (see _onSelectionChange). Not in native caret
+    // mode: there the browser moves the caret and no arrow logic applies.
+    if (e.key?.startsWith("Arrow") && !this._nativeCaret) {
+      this._arrowKeyAt = { key: e.key, time: Date.now() };
+    }
     // Firefox's experimental EditContext has no working caret navigation:
     // ArrowLeft never moves, ArrowRight jumps block to block and wraps from
     // the last table cell back to the first. On such UAs, take the arrows

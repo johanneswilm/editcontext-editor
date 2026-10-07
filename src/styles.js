@@ -12,6 +12,9 @@ export const EDITOR_CSS = `
   caret-color: transparent; /* we render our own caret */
   line-height: 1.5;
 }
+.ec-editor.ec-native-caret {
+  caret-color: auto; /* native caret mode: the browser draws the caret */
+}
 .ec-editor p, .ec-editor h1, .ec-editor h2, .ec-editor h3,
 .ec-editor h4, .ec-editor h5, .ec-editor h6 {
   margin: 0 0 0.5em;

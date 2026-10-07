@@ -19,6 +19,24 @@ body {
 .site-header h1 { margin: 0 0 0.3em; font-size: 2rem; }
 .tagline { max-width: 46em; margin: 0 0 0.6em; }
 .links { color: var(--accent); }
+.caret-mode {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  margin: 0.8rem 0 0;
+  font-size: 0.9rem;
+}
+.caret-mode label { font-weight: 600; }
+.caret-mode select {
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.3em 0.5em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+.caret-mode-note { color: color-mix(in srgb, CanvasText 55%, transparent); font-size: 0.82rem; }
 a { color: var(--accent); }
 main { max-width: 960px; margin: 0 auto; padding: 0 1.5rem 3rem; }
 .support-banner {
