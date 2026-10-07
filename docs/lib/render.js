@@ -67,6 +67,31 @@ export class PositionMap {
     return this.segments.find((s) => s.start <= o && o < s.end) ?? null;
   }
 
+  /**
+   * Escape target for arrowing left out of a table: the flat offset of the
+   * gap before the table's first content, where the caret lands at the end
+   * of the block preceding the table. Null when there is no such gap.
+   */
+  escapeFlatBefore(blockleafSeg) {
+    const first = this.segments.find(
+      (s) =>
+        (s.kind === "text" || s.kind === "leaf") &&
+        s.path &&
+        s.path.length > 1 &&
+        s.path[0] === blockleafSeg.path[0]
+    );
+    if (!first) return null;
+    let gap = this.segments.find((s) => s.kind === "gap" && s.end === first.start);
+    if (!gap) return null;
+    // Walk back across a run of consecutive gaps (the table's own noop gaps
+    // precede its content) so the caret lands on the block before the table.
+    for (;;) {
+      const prev = this.segments.find((s) => s.kind === "gap" && s.end === gap.start);
+      if (!prev) return gap.start;
+      gap = prev;
+    }
+  }
+
   /** Model location -> flat offset (best effort; null when unmapped). */
   locToFlat(path, offset = 0) {
     const eq = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);

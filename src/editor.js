@@ -267,8 +267,8 @@ export class Editor extends EventTarget {
     if (this._settingDomSelection || !this.focused) return;
     const domSel = this.element.ownerDocument.getSelection();
     if (!domSel || domSel.rangeCount === 0) return;
-    const anchorFlat = this.map.domPointToFlat(domSel.anchorNode, domSel.anchorOffset);
-    const focusFlat = this.map.domPointToFlat(domSel.focusNode, domSel.focusOffset);
+    let anchorFlat = this.map.domPointToFlat(domSel.anchorNode, domSel.anchorOffset);
+    let focusFlat = this.map.domPointToFlat(domSel.focusNode, domSel.focusOffset);
     if (anchorFlat == null || focusFlat == null) return;
     if (anchorFlat === this.sel.anchor && focusFlat === this.sel.head) return;
 
@@ -287,7 +287,55 @@ export class Editor extends EventTarget {
         const wasSelected =
           Math.min(this.sel.anchor, this.sel.head) === seg.start &&
           Math.max(this.sel.anchor, this.sel.head) === seg.end;
-        if (!wasSelected) {
+        // Table quirk: a table's cell content abuts its object character in
+        // the flat text (no gap), so the offset before the table is at the
+        // same time a real text position — "end of the last cell". A caret
+        // that lands there from the adjacent text must visit it collapsed
+        // once; only a later press from the same spot selects the table.
+        // Arrowing LEFT onto it from anywhere but that text escapes out of
+        // the table instead — the table is never selected on the way out.
+        // Inline leaves and gap-separated block images keep the direct
+        // select-on-step behavior.
+        const abutting =
+          seg.kind === "blockleaf" &&
+          (viaArrow === "ArrowLeft" || viaArrow === "ArrowRight")
+            ? this.map.segments.find(
+                (s) => (s.kind === "text" || s.kind === "leaf") && s.end === anchorFlat
+              )
+            : null;
+        if (abutting) {
+          // The same flat offset is reachable as a text point (end of the
+          // last cell) or as the table's boundary point. Only the text point
+          // is a visit; arriving at the boundary means the UA jumped onto
+          // the table, which on ArrowLeft is an escape, not a visit.
+          const dom = abutting.dom;
+          const inTextDom =
+            !!dom &&
+            (domSel.anchorNode === dom ||
+              (dom.nodeType === 1
+                ? dom.contains(domSel.anchorNode)
+                : dom.parentNode === domSel.anchorNode));
+          if (viaArrow === "ArrowLeft" && !inTextDom) {
+            const target = this.map.escapeFlatBefore(seg);
+            if (target != null) anchorFlat = focusFlat = target;
+            // No gap before the table: visit at the boundary instead.
+          } else if (
+            !wasSelected &&
+            this.sel.anchor === anchorFlat &&
+            this.sel.head === anchorFlat
+          ) {
+            this.sel = { anchor: seg.start, head: seg.end };
+            this.storedMarks = [];
+            this.editContext.updateSelection(seg.start, seg.end);
+            this._restoreDomSelection();
+            this._updateSelectedNode();
+            this._updateCaretAndBounds();
+            this._emit("selectionchange");
+            return;
+          }
+          // Otherwise keep the collapsed caret: the visit, or stepping off
+          // a selection that was already made.
+        } else if (!wasSelected) {
           this.sel = { anchor: seg.start, head: seg.end };
           this.storedMarks = [];
           this.editContext.updateSelection(seg.start, seg.end);
