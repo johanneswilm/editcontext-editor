@@ -434,11 +434,12 @@ export class Editor extends EventTarget {
     let edge;
     if (selObj) {
       if (right || left) {
-        // Stepping away from a selected object: the first press collapses
-        // beside it (left: at its start, right: at its end) — except that
-        // tables are never selected on the way out (arrowing left escapes
-        // them outright) and a right press onto an object across the gap
-        // selects that object directly.
+        // Stepping away from a selected object. Tables are never selected on
+        // the way out: arrowing left escapes them outright. Otherwise the
+        // press crosses the gap beside the object: an object on the far
+        // side gets selected directly (symmetric both ways), a text block
+        // on the right lands the caret at its start, and anything else (or
+        // nothing) collapses beside the object.
         if (left && this._tableAbuts(selObj)) {
           const target = this.map.escapeFlatBefore(selObj);
           if (target != null) {
@@ -446,14 +447,21 @@ export class Editor extends EventTarget {
             return;
           }
         }
-        if (right) {
-          const segs = this.map.segments;
-          const gap = segs[segs.indexOf(selObj) + 1];
-          const after = gap?.kind === "gap" ? segs[segs.indexOf(gap) + 1] : null;
-          if (after && (after.kind === "leaf" || after.kind === "blockleaf")) {
-            this._applySelection(extend ? this.sel.anchor : after.start, after.end);
-            return;
+        const segs = this.map.segments;
+        const i = segs.indexOf(selObj);
+        const gap = segs[i + (right ? 1 : -1)];
+        const beyond = gap?.kind === "gap" ? segs[i + (right ? 2 : -2)] : null;
+        if (beyond && (beyond.kind === "leaf" || beyond.kind === "blockleaf")) {
+          if (extend) {
+            this._applySelection(this.sel.anchor, left ? beyond.start : beyond.end);
+          } else {
+            this._applySelection(beyond.start, beyond.end);
           }
+          return;
+        }
+        if (right && beyond?.kind === "text") {
+          this._applySelection(extend ? this.sel.anchor : beyond.start, beyond.start);
+          return;
         }
         const beside = left ? selObj.start : selObj.end;
         this._applySelection(extend ? this.sel.anchor : beside, beside);
