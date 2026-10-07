@@ -195,6 +195,15 @@ export class PositionMap {
     }
     const end = this._blockEnds.get(node);
     if (end != null) return end;
+    const kids2 = node.children ?? [];
+    if (kids2.length > 0 && offset >= kids2.length) {
+      // "Past the end" of an intermediate container (e.g. a table cell <td>):
+      // map to the end of its last content instead of walking past an
+      // enclosing block object.
+      const last = kids2[kids2.length - 1];
+      const inner = this.domPointToFlat(last, last.nodeType === 3 ? last.nodeValue.length : last.childNodes.length);
+      if (inner != null) return inner;
+    }
     const parent = node.parentNode;
     if (parent) {
       const idx = Array.prototype.indexOf.call(parent.children, node);
