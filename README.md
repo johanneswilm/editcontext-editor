@@ -35,6 +35,14 @@ it yet. The library throws a clear error (and `isEditContextSupported()` returns
 is missing, so you can feature-detect and fall back. See
 [MDN](https://developer.mozilla.org/en-US/docs/Web/API/EditContext#browser_compatibility).
 
+**Firefox (experimental, `dom.editcontext.enabled`):** rendering, typing, and IME work, but the UA's
+caret navigation on EditContext hosts is non-functional — ArrowLeft never moves, ArrowRight jumps
+block to block and wraps from the last table cell back to the first. The editor therefore detects
+Firefox and moves the caret/selection in its own model on arrow keys (`preventDefault` in `keydown`,
+`src/editor.js` `_arrowMoveModel`), reproducing the same semantics as Chromium: per-grapheme walks,
+object selection when stepping onto images/tables, cell-by-cell table traversal, and escapes. Override
+with the `uaBrokenArrows` option (also useful for testing the model path in other browsers).
+
 ## Known Chromium issues and spec divergences
 
 Findings from building this library against Chrome/Edge 121+ (observe them live in the demo's

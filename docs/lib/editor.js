@@ -83,6 +83,11 @@ export class Editor extends EventTarget {
     this.element.setAttribute("tabindex", "0");
     this.element.setAttribute("role", "textbox");
     this.element.setAttribute("aria-multiline", "true");
+    // Firefox's experimental EditContext does not implement caret navigation
+    // (ArrowLeft is dead, ArrowRight wraps inside tables): move in the model
+    // there instead of relying on the UA. Override via options for testing.
+    this._uaBrokenArrows =
+      options.uaBrokenArrows ?? /firefox/i.test(navigator.userAgent);
     if (options.placeholder) {
       this.element.dataset.ecPlaceholder = options.placeholder;
     }
@@ -412,6 +417,222 @@ export class Editor extends EventTarget {
     const start = Math.min(anchorFlat, focusFlat);
     const end = Math.max(anchorFlat, focusFlat);
     this.editContext.updateSelection(start, end);
+    this._updateSelectedNode();
+    this._updateCaretAndBounds();
+    this._emit("selectionchange");
+  }
+
+  // -------------------------------------------- model-based arrow movement
+  // For UAs whose native caret navigation on EditContext hosts is broken
+  // (Firefox experimental): move the caret/selection in the flat model.
+  // Semantics mirror the selectionchange arrow path — objects are selected
+  // when stepped onto from adjacent text, tables are walked through cell by
+  // cell, and the caret escapes a table from its first cell — so behavior
+  // stays consistent with Chromium.
+
+  _selectedObjectSeg() {
+    const lo = Math.min(this.sel.anchor, this.sel.head);
+    const hi = Math.max(this.sel.anchor, this.sel.head);
+    return (
+      this.map.segments.find(
+        (s) =>
+          (s.kind === "leaf" || s.kind === "blockleaf") && s.start === lo && s.end === hi
+      ) ?? null
+    );
+  }
+
+  _graphemeStep(f, seg, forward) {
+    const text = this.map.flatText.slice(seg.start, seg.end);
+    try {
+      this._segmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
+      const local = f - seg.start;
+      for (const { index, segment } of this._segmenter.segment(text)) {
+        if (forward && index === local) return seg.start + index + segment.length;
+        if (!forward && index + segment.length === local) return seg.start + index;
+      }
+    } catch {
+      // no segmenter: fall through to code-unit stepping
+    }
+    return forward ? Math.min(f + 1, seg.end) : Math.max(f - 1, seg.start);
+  }
+
+  _objectAtStart(f) {
+    return (
+      this.map.segments.find(
+        (s) => (s.kind === "leaf" || s.kind === "blockleaf") && s.start === f
+      ) ?? null
+    );
+  }
+
+  _tableAbuts(obj) {
+    return obj.kind === "blockleaf" && this.map.contentEndsAt(obj.start);
+  }
+
+  /** One ArrowRight step in flat space. */
+  _stepRight(f) {
+    const segs = this.map.segments;
+    const text = segs.find((s) => s.kind === "text" && s.start <= f && f < s.end);
+    if (text) return { t: "rest", f: this._graphemeStep(f, text, true) };
+    const endSeg = segs.find((s) => s.kind === "text" && s.end === f);
+    const obj = this._objectAtStart(f);
+    if (endSeg) {
+      if (obj) return { t: "select", seg: obj }; // end of cell text: object char
+      const next = segs[segs.indexOf(endSeg) + 1];
+      if (next?.kind === "gap") {
+        const after = segs[segs.indexOf(next) + 1];
+        if (!after) return { t: "stay" };
+        if (after.kind === "leaf" || after.kind === "blockleaf") return { t: "select", seg: after };
+        return { t: "rest", f: after.start };
+      }
+      if (next && next.kind === "text") return { t: "rest", f: next.start };
+      return { t: "stay" };
+    }
+    if (obj) return { t: "select", seg: obj }; // beside an object
+    const gap = segs.find((s) => s.kind === "gap" && s.start <= f && f < s.end);
+    if (gap) {
+      const after = segs[segs.indexOf(gap) + 1];
+      if (!after) return { t: "stay" };
+      if (after.kind === "leaf" || after.kind === "blockleaf") return { t: "select", seg: after };
+      return { t: "rest", f: after.start };
+    }
+    return { t: "stay" };
+  }
+
+  /** One ArrowLeft step in flat space. */
+  _stepLeft(f) {
+    const segs = this.map.segments;
+    const text = segs.find((s) => s.kind === "text" && s.start < f && f <= s.end);
+    if (text) return { t: "rest", f: this._graphemeStep(f, text, false) };
+    const startSeg = segs.find((s) => s.kind === "text" && s.start === f);
+    if (startSeg) {
+      const i = segs.indexOf(startSeg);
+      const prev = segs[i - 1];
+      if (prev?.kind === "gap") {
+        const before = segs[i - 2];
+        if (prev.action === "noop" || !before || before.kind === "text") {
+          if (!before) return { t: "stay" };
+          return { t: "rest", f: before.kind === "gap" ? before.start : before.end };
+        }
+        if (before.kind === "leaf") return { t: "select", seg: before };
+        if (before.kind === "blockleaf") {
+          // A block after a table: visit the position after it; an image:
+          // select it.
+          if (this._tableAbuts(before)) return { t: "rest", f: before.end };
+          return { t: "select", seg: before };
+        }
+        return { t: "stay" };
+      }
+      if (prev?.kind === "leaf") return { t: "select", seg: prev }; // after inline image
+      return { t: "stay" };
+    }
+    const obj = this._objectAtStart(f);
+    if (obj) {
+      if (this._tableAbuts(obj)) {
+        const target = this.map.escapeFlatBefore(obj);
+        return target != null ? { t: "rest", f: target } : { t: "stay" };
+      }
+      return { t: "rest", f: Math.max(f - 1, 0) }; // walk past a block image
+    }
+    const gap = segs.find((s) => s.kind === "gap" && s.start <= f && f < s.end);
+    if (gap) {
+      const before = segs[segs.indexOf(gap) - 1];
+      if (!before) return { t: "stay" };
+      if (before.kind === "gap") return { t: "rest", f: before.start };
+      if (before.kind === "leaf") return { t: "select", seg: before };
+      if (before.kind === "blockleaf") {
+        if (this._tableAbuts(before)) return { t: "rest", f: before.start }; // into the cells
+        return { t: "select", seg: before };
+      }
+      if (before.kind === "text") return { t: "rest", f: before.end };
+      return { t: "stay" };
+    }
+    return { t: "stay" };
+  }
+
+  _arrowMoveModel(key, extend) {
+    const right = key === "ArrowRight";
+    const left = key === "ArrowLeft";
+    const selObj = this._selectedObjectSeg();
+    let edge;
+    if (selObj) {
+      edge =
+        key === "ArrowUp" ? selObj.start : key === "ArrowDown" ? selObj.end - 1 : right ? selObj.end - 1 : selObj.start;
+    } else {
+      const lo = Math.min(this.sel.anchor, this.sel.head);
+      const hi = Math.max(this.sel.anchor, this.sel.head);
+      if (key === "ArrowUp") edge = lo;
+      else if (key === "ArrowDown") edge = hi;
+      else if (extend) edge = this.sel.head;
+      else edge = right ? hi : lo;
+    }
+    let result = null;
+    if (right || left) {
+      result = right ? this._stepRight(edge) : this._stepLeft(edge);
+    } else {
+      // Vertical: ask the UA's hit testing for the point above/below the caret.
+      const r = this.map.caretRectAt(edge);
+      const doc = this.element.ownerDocument;
+      if (r && typeof doc.caretRangeFromPoint === "function") {
+        const y = key === "ArrowUp" ? r.top - 1 : r.bottom + 1;
+        try {
+          const range = doc.caretRangeFromPoint(r.left, y);
+          const nf = range && this.map.domPointToFlat(range.startContainer, range.startOffset);
+          if (nf != null && nf !== edge) result = { t: "rest", f: nf };
+        } catch {
+          // ignore and stay
+        }
+      }
+    }
+    if (!result || result.t === "stay") return;
+    if (result.t === "select") {
+      const seg = result.seg;
+      const already =
+        Math.min(this.sel.anchor, this.sel.head) === seg.start &&
+        Math.max(this.sel.anchor, this.sel.head) === seg.end;
+      if (already) {
+        // Stepping away from a selected object: select the next object in
+        // that direction when one is adjacent; otherwise collapse beside it.
+        // Tables escape left outright.
+        if (left && this._tableAbuts(seg)) {
+          const target = this.map.escapeFlatBefore(seg);
+          if (target != null) {
+            this._applySelection(extend ? this.sel.anchor : target, target);
+            return;
+          }
+        }
+        if (right) {
+          const far = this.map.segments.find(
+            (s) =>
+              s.dom &&
+              (s.kind === "leaf" || s.kind === "blockleaf") &&
+              s.start >= seg.end + 1 &&
+              s.start <= seg.end + 2
+          );
+          if (far) {
+            this._applySelection(far.start, far.end);
+            return;
+          }
+        }
+        const f = left ? seg.start : seg.end;
+        this._applySelection(extend ? this.sel.anchor : f, f);
+        return;
+      }
+      if (extend) this._applySelection(this.sel.anchor, seg.end);
+      else this._applySelection(seg.start, seg.end);
+      return;
+    }
+    // rest
+    if (extend) this._applySelection(this.sel.anchor, result.f);
+    else this._applySelection(result.f, result.f);
+  }
+
+  _applySelection(anchor, head) {
+    this.sel = { anchor, head };
+    this.storedMarks = [];
+    const start = Math.min(anchor, head);
+    const end = Math.max(anchor, head);
+    this.editContext.updateSelection(start, end);
+    this._restoreDomSelection();
     this._updateSelectedNode();
     this._updateCaretAndBounds();
     this._emit("selectionchange");
@@ -798,6 +1019,27 @@ export class Editor extends EventTarget {
     // Remember arrow keys so the selectionchange handler can tell caret
     // movement from a click (see _onSelectionChange).
     if (e.key?.startsWith("Arrow")) this._arrowKeyAt = { key: e.key, time: Date.now() };
+    // Firefox's experimental EditContext has no working caret navigation:
+    // ArrowLeft never moves, ArrowRight jumps block to block and wraps from
+    // the last table cell back to the first. On such UAs, take the arrows
+    // over and move in the model instead (mirrors the semantics of the
+    // selectionchange arrow path).
+    if (
+      this._uaBrokenArrows &&
+      this.focused &&
+      !this.isComposing &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      (e.key === "ArrowLeft" ||
+        e.key === "ArrowRight" ||
+        e.key === "ArrowUp" ||
+        e.key === "ArrowDown")
+    ) {
+      e.preventDefault();
+      this._arrowMoveModel(e.key, e.shiftKey);
+      return;
+    }
     // Undo/redo: Chrome does not translate Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y on
     // an EditContext editing host into beforeinput(history*) events, so
     // handle the keys directly. (The beforeinput branch stays as a fallback
