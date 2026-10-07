@@ -51,14 +51,25 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
 - **`beforeinput(insertCompositionText)` intentionally does not fire** on the element (per spec) —
   composition arrives exclusively through the EditContext's `compositionstart`/`textupdate`/
   `textformatupdate`/`compositionend` events.
-- **No native caret or selection highlight is painted for EditContext hosts** (spec
-  design; verified in Chrome 154 by hiding the editor's `.ec-caret` — nothing remains).
-  The host element is not editable in the browser's eyes, so the library draws its own
-  blinking caret and restores the DOM selection for highlighting. Note for readers of old
-  demos: the original Edge/early-Chromium implementations *did* paint a native caret and
-  selection (the era of the W3C `native_selection_demo`, which contains no caret code and
-  documented "Caret is not drawn" once the behavior changed); the shipped spec-aligned
-  implementation removed that, which is why such demos show no caret today.
+- **Chromium paints a native caret on EditContext hosts** (verified in Chrome/Brave 154):
+  a collapsed DOM selection inside the *focused* host blinks natively. The caret follows the
+  DOM selection (not `editContext.updateSelection`), disappears when the host blurs or the
+  DOM selection is removed, does not appear when no EditContext is attached, and honors
+  `caret-color` — the library's stylesheet sets `caret-color: transparent` on `.ec-editor`
+  precisely to suppress it, since it draws its own `.ec-caret`. Mechanism: Chromium's style
+  adjuster forces `user-modify: read-write` on any element with an EditContext
+  (`StyleAdjuster::AdjustStyleForEditing`, `style_adjuster.cc`), which makes the regular
+  editable-position caret logic (`FrameCaret::ShouldShowCaret`) accept the collapsed DOM
+  selection — the caret is the ordinary DOM-selection caret, not an EditContext feature.
+  The spec itself still leaves caret/selection rendering to the author, and engines without
+  this behavior paint nothing,
+  so the custom caret remains the portable option — it also covers caret positions at
+  block-object boundaries where no DOM text position exists. (Correction of an earlier note
+  here that claimed the opposite: that test hid `.ec-caret` while the stylesheet's
+  `caret-color: transparent` was still in effect, so the native caret was suppressed and
+  the "nothing remains" conclusion was wrong. This is also why old W3C-era demos such as
+  `native_selection_demo` — which contain no caret code — do show a blinking caret in
+  current Chromium, despite documenting "Caret is not drawn" from an earlier era.)
 - **No native object selection** for images/tables (spec design): the editor implements
   click-to-select with its own highlight, so Backspace/Delete and typing-over work on selected objects.
   Arrow keys select an object when stepping onto it (stepping off collapses the caret beside it), and
@@ -217,8 +228,10 @@ JSON document model  <->  flat text (EditContext buffer)  <->  DOM
    `characterboundsupdate` is answered with real per-character rects from the DOM, so the candidate
    window tracks the caret. Because the IME talks to the buffer (not the DOM), re-rendering the DOM
    mid-composition is safe.
-5. The caret is drawn by the library (native carets only render in editable regions); text selection
-   uses the native selection over the rendered DOM, mapped back to buffer offsets via the position map.
+5. The caret is drawn by the library (`caret-color: transparent` suppresses the native caret
+   Chromium would otherwise paint for the focused host — see "Known Chromium issues"); text
+   selection uses the native selection over the rendered DOM, mapped back to buffer offsets
+   via the position map.
 
 **Third-party input events.** Synthetic events dispatched by external code (e.g. browser extensions)
 never reach the EditContext buffer, so the `textupdate` mirroring never sees them. The editor therefore
