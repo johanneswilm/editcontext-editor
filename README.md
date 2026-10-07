@@ -40,13 +40,13 @@ is missing, so you can feature-detect and fall back. See
 
 **Firefox (experimental, `dom.editcontext.enabled`):** rendering, typing, and IME work, but the UA's
 caret navigation on EditContext hosts is non-functional — ArrowLeft never moves, ArrowRight jumps
-block to block and wraps from the last table cell back to the first. The editor therefore detects
-Firefox and moves the caret/selection in its own model on arrow keys (`preventDefault` in `keydown`,
-`src/editor.js` `_arrowMoveModel`), reproducing the same semantics as Chromium: per-grapheme walks,
-object selection when stepping onto images/tables, cell-by-cell table traversal, and escapes. Override
-with the `uaBrokenArrows` option (also useful for testing the model path in other browsers).
-Both the model movement and all other caret interception are off in `caretMode: "native"` — there the
-browser is fully in charge of the caret, broken navigation included.
+block to block and wraps from the last table cell back to the first. This no longer matters for the
+default (custom) caret mode: arrow keys are intercepted on **every** browser and the caret/selection
+is moved in the editor's own flat model (`preventDefault` in `keydown`, `src/editor.js`
+`_arrowMoveModel`) — per-grapheme walks, object selection when stepping onto images/tables,
+cell-by-cell table traversal, and table escapes — so behavior is identical everywhere and immune to
+UA quirks. Only `caretMode: "native"` relies on the browser's own caret movement; there, Firefox's
+broken navigation shows raw, which is exactly what that mode is for.
 
 ## Known Chromium issues and spec divergences
 
@@ -224,12 +224,17 @@ JSON document model  <->  flat text (EditContext buffer)  <->  DOM
    window tracks the caret. Because the IME talks to the buffer (not the DOM), re-rendering the DOM
    mid-composition is safe.
 5. The caret is drawn by the library (`caret-color: transparent` suppresses the native caret
-   Chromium would otherwise paint for the focused host — see "Known Chromium issues"); text
-   selection uses the native selection over the rendered DOM, mapped back to buffer offsets
-   via the position map. With `caretMode: "native"` the library steps aside: no caret drawing,
-   no arrow-key interception, no arrow-driven object selection — the browser paints the caret
-   for the DOM selection and moves it natively (including its current quirks, which is exactly
-   what that mode is for: demonstrating raw EditContext caret behavior to browser developers).
+   Chromium would otherwise paint for the focused host — see "Known Chromium issues"), and caret
+   *movement* is computed, not reacted to: arrow keys are intercepted on every UA, the target is
+   calculated in the flat model (per-grapheme steps, object selection when stepping onto an
+   image/table, cell-by-cell table traversal, table escapes; vertical steps find their target with
+   `caretRangeFromPoint` and then go through the same placement), translated to a DOM position, and
+   the selection + caret are placed there by the editor itself. External placements (clicks, drags,
+   Home/End, word moves) arrive as DOM `selectionchange` and are mapped back to buffer offsets via
+   the position map. With `caretMode: "native"` the library steps aside: no caret drawing, no
+   arrow-key interception — the browser paints the caret for the DOM selection and moves it natively
+   (including its current quirks, which is exactly what that mode is for: demonstrating raw
+   EditContext caret behavior to browser developers).
 
 **Third-party input events.** Synthetic events dispatched by external code (e.g. browser extensions)
 never reach the EditContext buffer, so the `textupdate` mirroring never sees them. The editor therefore

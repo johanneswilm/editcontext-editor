@@ -83,23 +83,17 @@ export class Editor extends EventTarget {
     this.element.setAttribute("tabindex", "0");
     this.element.setAttribute("role", "textbox");
     this.element.setAttribute("aria-multiline", "true");
-    // Caret handling: "custom" (default) draws the caret in JS and manages
-    // caret movement (arrow-key object selection, model-based movement on
-    // UAs with broken native navigation); "native" leaves everything about
-    // the caret — drawing and movement — to the browser.
+    // Caret handling: "custom" (default) draws the caret in JS and moves it
+    // entirely in its own model — arrow keys are intercepted on every UA,
+    // the target is computed in the flat model, translated to a DOM position,
+    // and the caret drawn there. "native" leaves everything about the caret —
+    // drawing and movement — to the browser.
     const caretMode = options.caretMode ?? "custom";
     if (caretMode !== "custom" && caretMode !== "native") {
       throw new Error(`Unknown caretMode ${JSON.stringify(caretMode)} — expected "custom" or "native"`);
     }
     this._nativeCaret = caretMode === "native";
     if (this._nativeCaret) this.element.classList.add("ec-native-caret");
-    // Firefox's experimental EditContext does not implement caret navigation
-    // (ArrowLeft is dead, ArrowRight wraps inside tables): move in the model
-    // there instead of relying on the UA. Override via options for testing.
-    // In native caret mode the browser is in charge, so never intercept.
-    this._uaBrokenArrows =
-      !this._nativeCaret &&
-      (options.uaBrokenArrows ?? /firefox/i.test(navigator.userAgent));
     if (options.placeholder) {
       this.element.dataset.ecPlaceholder = options.placeholder;
     }
@@ -119,7 +113,6 @@ export class Editor extends EventTarget {
     this._pendingSelectDir = null;
     this._pendingCaretLoc = null;
     this._pasteGuard = false;
-    this._arrowKeyAt = null;
     this._listeners = [];
     this.history = new History(options.history);
 
@@ -222,21 +215,6 @@ export class Editor extends EventTarget {
     };
   }
 
-  /** Object segment (inline image, table, block image) whose character is at flat offset `o`. */
-  _objectSegAt(o) {
-    const seg = this.map.segAt(o);
-    return seg?.dom && (seg.kind === "leaf" || seg.kind === "blockleaf") ? seg : null;
-  }
-
-  /** Object segment immediately before or after the gap position `o`. */
-  _objectSegBeside(o) {
-    return (
-      this.map.segments.find(
-        (s) => s.dom && (s.kind === "leaf" || s.kind === "blockleaf") && (s.end === o || s.start === o)
-      ) ?? null
-    );
-  }
-
   _restoreDomSelection() {
     const domSel = this.element.ownerDocument.getSelection();
     if (!domSel) return;
@@ -289,145 +267,11 @@ export class Editor extends EventTarget {
     if (anchorFlat == null || focusFlat == null) return;
     if (anchorFlat === this.sel.anchor && focusFlat === this.sel.head) return;
 
-    // Stepping onto an object (inline image, table, block image) with the
-    // arrow keys selects it — the same state as click-select. Stepping off
-    // a selected object collapses the caret beside it instead. Only arrow
-    // keys trigger this: a click next to an object keeps a plain caret.
-    const viaArrow =
-      this._nativeCaret || !this._arrowKeyAt
-        ? null
-        : Date.now() - this._arrowKeyAt.time < 1000
-          ? this._arrowKeyAt.key
-          : null;
-    this._arrowKeyAt = null;
-    if (viaArrow && anchorFlat === focusFlat) {
-      let seg = this._objectSegAt(anchorFlat);
-      let atGap = false;
-      if (!seg && this.map.segAt(anchorFlat)?.kind === "gap") {
-        seg = this._objectSegBeside(anchorFlat);
-        atGap = !!seg;
-      }
-      if (seg) {
-        const wasSelected =
-          Math.min(this.sel.anchor, this.sel.head) === seg.start &&
-          Math.max(this.sel.anchor, this.sel.head) === seg.end;
-        // Table quirk: a table's cell content abuts its object character in
-        // the flat text (no gap), so the offset before the table is at the
-        // same time a real text position — "end of the last cell". A caret
-        // that lands there from the adjacent text must visit it collapsed
-        // once; only a later press from the same spot selects the table.
-        // Arrowing LEFT onto it from anywhere but that text escapes out of
-        // the table instead — the table is never selected on the way out.
-        // Inline leaves and gap-separated block images keep the direct
-        // select-on-step behavior.
-        const abutting =
-          seg.kind === "blockleaf" && !atGap && (viaArrow === "ArrowLeft" || viaArrow === "ArrowRight")
-            ? this.map.segments.find(
-                (s) => (s.kind === "text" || s.kind === "leaf") && s.end === anchorFlat
-              )
-            : null;
-        if (abutting) {
-          // The same flat offset is reachable as a text point (end of the
-          // last cell) or as the table's boundary point. Only the text point
-          // is a visit; arriving at the boundary means the UA jumped onto
-          // the table, which on ArrowLeft is an escape, not a visit.
-          const dom = abutting.dom;
-          const inTextDom =
-            !!dom &&
-            (domSel.anchorNode === dom ||
-              (dom.nodeType === 1
-                ? dom.contains(domSel.anchorNode)
-                : dom.parentNode === domSel.anchorNode));
-          if (viaArrow === "ArrowLeft" && !inTextDom) {
-            const target = this.map.escapeFlatBefore(seg);
-            if (target != null) anchorFlat = focusFlat = target;
-            // No gap before the table: visit at the boundary instead.
-          } else if (
-            !wasSelected &&
-            this.sel.anchor === anchorFlat &&
-            this.sel.head === anchorFlat
-          ) {
-            this.sel = { anchor: seg.start, head: seg.end };
-            this.storedMarks = [];
-            this.editContext.updateSelection(seg.start, seg.end);
-            this._restoreDomSelection();
-            this._updateSelectedNode();
-            this._updateCaretAndBounds();
-            this._emit("selectionchange");
-            return;
-          }
-          // Otherwise keep the collapsed caret: the visit, or stepping off
-          // a selection that was already made.
-        } else if (atGap) {
-          // Collapsed on a gap next to an object. Stepping toward an object
-          // selects it, except when arrowing left into a table — there the
-          // caret walks through the cell contents instead. Stepping away
-          // from a selected object selects the next object in that
-          // direction; coming from a table's abutting text and moving away
-          // still selects the table (the caret was at its boundary).
-          const toward = (seg.start === anchorFlat) === (viaArrow === "ArrowRight");
-          const abText =
-            seg.kind === "blockleaf"
-              ? this.map.segments.find(
-                  (s) => (s.kind === "text" || s.kind === "leaf") && s.end === seg.start
-                )
-              : null;
-          const prev = Math.min(this.sel.anchor, this.sel.head);
-          const fromAbuttingText = !!abText && prev >= abText.start && prev <= abText.end;
-          const walkIntoTable =
-            toward && !!abText && viaArrow === "ArrowLeft" && !fromAbuttingText;
-          if (!toward && wasSelected) {
-            const far = this.map.segments.find(
-              (s) =>
-                s.dom &&
-                (s.kind === "leaf" || s.kind === "blockleaf") &&
-                ((viaArrow === "ArrowRight" && s.start === anchorFlat + 1) ||
-                  (viaArrow === "ArrowLeft" && s.end === anchorFlat - 1))
-            );
-            if (far) {
-              this.sel = { anchor: far.start, head: far.end };
-              this.storedMarks = [];
-              this.editContext.updateSelection(far.start, far.end);
-              this._restoreDomSelection();
-              this._updateSelectedNode();
-              this._updateCaretAndBounds();
-              this._emit("selectionchange");
-              return;
-            }
-            // else collapse
-          } else if (!toward && !wasSelected && fromAbuttingText) {
-            this.sel = { anchor: seg.start, head: seg.end };
-            this.storedMarks = [];
-            this.editContext.updateSelection(seg.start, seg.end);
-            this._restoreDomSelection();
-            this._updateSelectedNode();
-            this._updateCaretAndBounds();
-            this._emit("selectionchange");
-            return;
-          } else if (toward && !wasSelected && !walkIntoTable) {
-            this.sel = { anchor: seg.start, head: seg.end };
-            this.storedMarks = [];
-            this.editContext.updateSelection(seg.start, seg.end);
-            this._restoreDomSelection();
-            this._updateSelectedNode();
-            this._updateCaretAndBounds();
-            this._emit("selectionchange");
-            return;
-          }
-          // Otherwise keep the collapsed caret: walking into a table, a
-          // step-off beside the object, or no object in that direction.
-        } else if (!wasSelected) {
-          this.sel = { anchor: seg.start, head: seg.end };
-          this.storedMarks = [];
-          this.editContext.updateSelection(seg.start, seg.end);
-          this._restoreDomSelection();
-          this._updateSelectedNode();
-          this._updateCaretAndBounds();
-          this._emit("selectionchange");
-          return;
-        }
-      }
-    }
+    // External selection placement (clicks, drags, Home/End, word moves…):
+    // take the DOM selection as reported. Arrow keys never reach this code in
+    // custom caret mode — they are intercepted in _onKeyDown and applied from
+    // the model — and in native mode we deliberately keep the browser's
+    // landing spot untouched.
     this.sel = { anchor: anchorFlat, head: focusFlat };
     this.storedMarks = [];
     const start = Math.min(anchorFlat, focusFlat);
@@ -439,12 +283,13 @@ export class Editor extends EventTarget {
   }
 
   // -------------------------------------------- model-based arrow movement
-  // For UAs whose native caret navigation on EditContext hosts is broken
-  // (Firefox experimental): move the caret/selection in the flat model.
-  // Semantics mirror the selectionchange arrow path — objects are selected
-  // when stepped onto from adjacent text, tables are walked through cell by
-  // cell, and the caret escapes a table from its first cell — so behavior
-  // stays consistent with Chromium.
+  // The single arrow-movement path in custom caret mode (all UAs): one step
+  // in the flat model, then the result is translated to a DOM position and
+  // applied from here. Objects are selected when stepped onto from adjacent
+  // text, tables are walked through cell by cell, and the caret escapes a
+  // table from its first cell. Vertical steps find their target with the
+  // UA's own hit testing (caretRangeFromPoint), then go through the same
+  // model placement.
 
   _selectedObjectSeg() {
     const lo = Math.min(this.sel.anchor, this.sel.head);
@@ -488,7 +333,16 @@ export class Editor extends EventTarget {
   _stepRight(f) {
     const segs = this.map.segments;
     const text = segs.find((s) => s.kind === "text" && s.start <= f && f < s.end);
-    if (text) return { t: "rest", f: this._graphemeStep(f, text, true) };
+    if (text) {
+      const g = this._graphemeStep(f, text, true);
+      const obj = this._objectAtStart(g);
+      // Stepping onto an inline object selects it (Chromium semantics) —
+      // except an abutting table, which is visited collapsed first.
+      if (obj && !(obj.kind === "blockleaf" && this._tableAbuts(obj))) {
+        return { t: "select", seg: obj };
+      }
+      return { t: "rest", f: g };
+    }
     const endSeg = segs.find((s) => s.kind === "text" && s.end === f);
     const obj = this._objectAtStart(f);
     if (endSeg) {
@@ -517,6 +371,14 @@ export class Editor extends EventTarget {
   /** One ArrowLeft step in flat space. */
   _stepLeft(f) {
     const segs = this.map.segments;
+    // A table's object char abuts its cell text: the same offset is both
+    // "end of the last cell" and the table's boundary. The boundary wins on
+    // the way out — the table is never walked back into from here.
+    const boundary = this._objectAtStart(f);
+    if (boundary && this._tableAbuts(boundary)) {
+      const target = this.map.escapeFlatBefore(boundary);
+      return target != null ? { t: "rest", f: target } : { t: "stay" };
+    }
     const text = segs.find((s) => s.kind === "text" && s.start < f && f <= s.end);
     if (text) return { t: "rest", f: this._graphemeStep(f, text, false) };
     const startSeg = segs.find((s) => s.kind === "text" && s.start === f);
@@ -571,8 +433,33 @@ export class Editor extends EventTarget {
     const selObj = this._selectedObjectSeg();
     let edge;
     if (selObj) {
-      edge =
-        key === "ArrowUp" ? selObj.start : key === "ArrowDown" ? selObj.end - 1 : right ? selObj.end - 1 : selObj.start;
+      if (right || left) {
+        // Stepping away from a selected object: the first press collapses
+        // beside it (left: at its start, right: at its end) — except that
+        // tables are never selected on the way out (arrowing left escapes
+        // them outright) and a right press onto an object across the gap
+        // selects that object directly.
+        if (left && this._tableAbuts(selObj)) {
+          const target = this.map.escapeFlatBefore(selObj);
+          if (target != null) {
+            this._applySelection(extend ? this.sel.anchor : target, target);
+            return;
+          }
+        }
+        if (right) {
+          const segs = this.map.segments;
+          const gap = segs[segs.indexOf(selObj) + 1];
+          const after = gap?.kind === "gap" ? segs[segs.indexOf(gap) + 1] : null;
+          if (after && (after.kind === "leaf" || after.kind === "blockleaf")) {
+            this._applySelection(extend ? this.sel.anchor : after.start, after.end);
+            return;
+          }
+        }
+        const beside = left ? selObj.start : selObj.end;
+        this._applySelection(extend ? this.sel.anchor : beside, beside);
+        return;
+      }
+      edge = key === "ArrowUp" ? selObj.start : selObj.end - 1;
     } else {
       const lo = Math.min(this.sel.anchor, this.sel.head);
       const hi = Math.max(this.sel.anchor, this.sel.head);
@@ -601,38 +488,8 @@ export class Editor extends EventTarget {
     }
     if (!result || result.t === "stay") return;
     if (result.t === "select") {
+      // Stepping onto an object selects it — the same state as click-select.
       const seg = result.seg;
-      const already =
-        Math.min(this.sel.anchor, this.sel.head) === seg.start &&
-        Math.max(this.sel.anchor, this.sel.head) === seg.end;
-      if (already) {
-        // Stepping away from a selected object: select the next object in
-        // that direction when one is adjacent; otherwise collapse beside it.
-        // Tables escape left outright.
-        if (left && this._tableAbuts(seg)) {
-          const target = this.map.escapeFlatBefore(seg);
-          if (target != null) {
-            this._applySelection(extend ? this.sel.anchor : target, target);
-            return;
-          }
-        }
-        if (right) {
-          const far = this.map.segments.find(
-            (s) =>
-              s.dom &&
-              (s.kind === "leaf" || s.kind === "blockleaf") &&
-              s.start >= seg.end + 1 &&
-              s.start <= seg.end + 2
-          );
-          if (far) {
-            this._applySelection(far.start, far.end);
-            return;
-          }
-        }
-        const f = left ? seg.start : seg.end;
-        this._applySelection(extend ? this.sel.anchor : f, f);
-        return;
-      }
       if (extend) this._applySelection(this.sel.anchor, seg.end);
       else this._applySelection(seg.start, seg.end);
       return;
@@ -1037,19 +894,13 @@ export class Editor extends EventTarget {
   }
 
   _onKeyDown(e) {
-    // Remember arrow keys so the selectionchange handler can tell caret
-    // movement from a click (see _onSelectionChange). Not in native caret
-    // mode: there the browser moves the caret and no arrow logic applies.
-    if (e.key?.startsWith("Arrow") && !this._nativeCaret) {
-      this._arrowKeyAt = { key: e.key, time: Date.now() };
-    }
-    // Firefox's experimental EditContext has no working caret navigation:
-    // ArrowLeft never moves, ArrowRight jumps block to block and wraps from
-    // the last table cell back to the first. On such UAs, take the arrows
-    // over and move in the model instead (mirrors the semantics of the
-    // selectionchange arrow path).
+    // Custom caret mode: the browser never moves the caret. Intercept the
+    // arrow keys on every UA, compute the target in the flat model, and
+    // place the DOM selection + caret there ourselves (_arrowMoveModel).
+    // Modifier combos (word/paragraph moves) and IME composition are left
+    // to the browser and land here through selectionchange instead.
     if (
-      this._uaBrokenArrows &&
+      !this._nativeCaret &&
       this.focused &&
       !this.isComposing &&
       !e.ctrlKey &&
