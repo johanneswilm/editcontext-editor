@@ -219,6 +219,11 @@ export class PositionMap {
       return seg.dom.getBoundingClientRect();
     }
     const point = this.flatToDomPoint(o);
+    return this.rectForPoint(point);
+  }
+
+  /** DOM rect for a DOM point (text offset or element boundary). */
+  rectForPoint(point) {
     if (!point || !point.node.ownerDocument) return null;
     const doc = point.node.ownerDocument;
     const range = doc.createRange();
@@ -268,6 +273,17 @@ export class PositionMap {
   caretRectAt(o) {
     const seg = this.segAt(o);
     if (seg?.kind === "blockleaf" && seg.dom) {
+      // Table: the last cell's content abuts the object char in the flat text
+      // (no gap in between), so a caret at the object char's start is really
+      // "end of the last cell" — draw it after that content, not at the
+      // table's top-left corner. Block images are preceded by a gap segment,
+      // so they keep the beside-the-block caret below.
+      const i = this.segments.indexOf(seg);
+      const prev = this.segments[i - 1];
+      if (prev && prev.end === o && (prev.kind === "text" || prev.kind === "leaf")) {
+        const r = this.rectForPoint(this.flatToDomPoint(o));
+        if (r) return r;
+      }
       const r = seg.dom.getBoundingClientRect();
       const parent = seg.dom.parentElement;
       if (parent) {
