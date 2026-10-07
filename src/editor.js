@@ -684,16 +684,6 @@ export class Editor extends EventTarget {
       this.redo();
       return;
     }
-    // Enter is not translated to a text update by the EditContext; Chrome
-    // also doesn't fire beforeinput(insertParagraph) on editing hosts, so
-    // handle the key directly. (The beforeinput branch stays as a fallback
-    // for input sources that produce it without a keydown.)
-    if (e.key === "Enter" && !this.isComposing && !e.defaultPrevented) {
-      e.preventDefault();
-      if (e.shiftKey) this.insertHardBreak();
-      else this.splitBlock();
-      return;
-    }
     if (e.key === "Tab") {
       const moved = this._moveTableSelection(e.shiftKey ? "prev" : "next");
       if (moved) e.preventDefault();

@@ -53,10 +53,6 @@ trapping above.
 Findings from building this library against Chrome/Edge 121+ (observe them live in the demo's
 **Events** pane — element vs. EditContext vs. document events are tagged there):
 
-- **Enter produces no `beforeinput`.** The [spec](https://w3c.github.io/edit-context/) says the editing
-  host receives `beforeinput` as in UI Events, but pressing Enter delivers only `keydown`. The editor
-  handles Enter/Shift+Enter directly in `keydown` (the `beforeinput(insertParagraph)` branch remains as
-  a fallback for user agents that do fire it).
 - **Undo/redo produces no `beforeinput`.** `historyUndo`/`historyRedo` never fire on EditContext hosts,
   so Ctrl/⌘+Z, Ctrl/⌘+Shift+Z and Ctrl+Y are handled in `keydown` with the editor's own history stack.
 - **`beforeinput` for formatting *does* fire** (`formatBold`, `formatItalic`, …), as do the clipboard
