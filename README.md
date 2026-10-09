@@ -55,11 +55,6 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
 
 - **Undo/redo produces no `beforeinput`.** `historyUndo`/`historyRedo` never fire on EditContext hosts,
   so Ctrl/⌘+Z, Ctrl/⌘+Shift+Z and Ctrl+Y are handled in `keydown` with the editor's own history stack.
-- **`beforeinput` for formatting *does* fire** (`formatBold`, `formatItalic`, …), as do the clipboard
-  inputTypes (`insertFromPaste`, `deleteByCut`) — those are handled from `beforeinput`.
-- **`beforeinput(insertCompositionText)` intentionally does not fire** on the element (per spec) —
-  composition arrives exclusively through the EditContext's `compositionstart`/`textupdate`/
-  `textformatupdate`/`compositionend` events.
 - **No native object selection** for images/tables (spec design): the editor implements
   click-to-select with its own highlight, so Backspace/Delete and typing-over work on selected objects.
   Clicking in the margin beside a table or block image selects it too, so both are selectable without
@@ -70,23 +65,6 @@ Findings from building this library against Chrome/Edge 121+ (observe them live 
   highlight over the object instead of a boundary bar. All of this selection logic — movement,
   object selection, click handling — lives in **`src/selection.js`** (~380 lines), so the cost of a
   fully script-controlled selection on top of EditContext is visible in one file.
-- **Object selections don't survive in the EditContext** (Chromium quirk, verified in Chrome 154):
-  pushing `updateSelection(start, end)` over an object character works, but after an author
-  `updateText()` call Chrome asynchronously collapses the selection to its start. The editor therefore
-  never relies on the UA seeing an object-char selection: deleting a selected block object is handled
-  in `keydown` as a model transaction instead of via the `textupdate` mirroring.
-- **Event shapes changed during development.** Current Chrome exposes
-  `textupdate.updateRangeStart/updateRangeEnd/text` and `textformatupdate.getTextFormats()`; older
-  builds used `updateTextStart/updateTextEnd/updateText` and direct `rangeStart/underlineStyle`
-  properties. The library accepts both.
-- **`beforeinput` on the host *is* cancelable — `preventDefault()` genuinely blocks the edit**
-  (verified in Chrome 154). `beforeinput` fires on the editing host *element* (not the EditContext
-  object) with `cancelable: true` for `insertText`, `insertFromPaste`, `deleteContent*`, formats,
-  etc.; canceling leaves the EditContext buffer untouched and no `textupdate` follows. What you
-  *cannot* cancel this way is composition: `compositionstart`/`textupdate`/`compositionend` fire on
-  the EditContext object after its buffer is already updated (`textupdate.cancelable` is true, but
-  canceling is a no-op — revert with `editContext.updateText()` if needed). Also, no `input` event
-  fires at all on EditContext hosts; `textupdate` is the only after-the-fact notification.
 
 ## Quick start
 

@@ -691,9 +691,12 @@ export class Editor extends EventTarget {
     // Backspace/Delete with the selection covering whole block objects
     // (table / block image) removes them in a transaction, leaving the
     // buffer untouched. Routing this through the textupdate mirroring is
-    // unreliable: Chrome collapses EditContext selections that span object
-    // characters after author updateText() calls, so by the time the second
-    // keypress arrives the UA no longer sees the object selected.
+    // unreliable on Chromium before 157: it collapses EditContext selections
+    // that span object characters after author updateText() calls, so by the
+    // time the second keypress arrives the UA no longer sees the object
+    // selected. Fixed upstream in Chrome 157 (crbug.com/529413105,
+    // crrev.com/c/8336988) — this interception can be dropped once the fix
+    // has reached the stable channel.
     if (
       (e.key === "Backspace" || e.key === "Delete") &&
       !this.isComposing &&
